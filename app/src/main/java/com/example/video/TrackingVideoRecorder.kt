@@ -317,7 +317,8 @@ class TrackingVideoRecorder(
             canvas.drawRoundRect(hudRect, 10f, 10f, hudBgPaint)
             canvas.drawRoundRect(hudRect, 10f, 10f, hudBorderPaint)
 
-            canvas.drawText("🎯 LOCKED: ${prominent.label.uppercase()}", hudLeft + 14f, hudTop + 32f, textPaint)
+            val trackIdStr = if (prominent.isTrackedAcrossFrames) "TRACK ID #${prominent.id}" else "ID #${prominent.id}"
+            canvas.drawText("🎯 LOCKED: ${prominent.label.uppercase()} [$trackIdStr]", hudLeft + 14f, hudTop + 32f, textPaint)
             canvas.drawText("Conf: ${prominent.formattedScore()}  •  ${prominent.formattedVelocity()}", hudLeft + 14f, hudTop + 62f, textSubPaint)
         }
 

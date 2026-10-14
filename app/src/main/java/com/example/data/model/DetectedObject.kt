@@ -23,6 +23,8 @@ data class DetectedObject(
     val velocityAngleDeg: Float = 0f,
     val firstSeenTimestampMs: Long = System.currentTimeMillis(),
     val lastSeenTimestampMs: Long = System.currentTimeMillis(),
+    val ageInFrames: Int = 1,
+    val isTrackedAcrossFrames: Boolean = true,
     val colorArgb: Int = 0xFF00F5D4.toInt()
 ) {
     val centerX: Float
@@ -43,6 +45,9 @@ data class DetectedObject(
     val centerPoint: PointF
         get() = PointF(centerX, centerY)
 
+    val trackingDurationMs: Long
+        get() = (lastSeenTimestampMs - firstSeenTimestampMs).coerceAtLeast(0L)
+
     fun formattedScore(): String = "${(score * 100).toInt()}%"
 
     fun formattedVelocity(): String {
@@ -51,5 +56,10 @@ data class DetectedObject(
         } else {
             "${velocityPxPerSec.toInt()} px/s"
         }
+    }
+
+    fun formattedTrackingDuration(): String {
+        val sec = trackingDurationMs / 1000f
+        return if (sec >= 1f) String.format(java.util.Locale.US, "%.1fs", sec) else "${trackingDurationMs}ms"
     }
 }

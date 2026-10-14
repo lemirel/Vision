@@ -51,6 +51,8 @@ import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.TrackChanges
+import com.example.ml.TrackingMode
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -156,6 +158,7 @@ fun CameraPreviewScreen(
     var showTrackingId by remember { mutableStateOf(true) }
     var showTrajectory by remember { mutableStateOf(true) }
     var overlayStyle by remember { mutableStateOf(OverlayStyle.CYBER_HUD) }
+    var isTrackingModeEnabled by remember { mutableStateOf(true) }
 
     val objectTracker = remember { ObjectTracker() }
 
@@ -346,7 +349,7 @@ fun CameraPreviewScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .statusBarsPadding()
-                .padding(horizontal = 16.dp, vertical = 8.dp)
+                .padding(horizontal = 14.dp, vertical = 8.dp)
                 .align(Alignment.TopCenter)
         ) {
             Row(
@@ -354,14 +357,14 @@ fun CameraPreviewScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // FPS & Latency badge
+                // Left: FPS & Latency badge
                 Surface(
                     color = SurfaceDark.copy(alpha = 0.85f),
                     shape = RoundedCornerShape(20.dp),
                     border = BorderDefaultsBorder(CyberCyan.copy(alpha = 0.5f))
                 ) {
                     Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Box(
@@ -374,17 +377,58 @@ fun CameraPreviewScreen(
                         Text(
                             text = "${fps} FPS • ${inferenceLatencyMs}ms",
                             color = Color.White,
-                            fontSize = 12.sp,
+                            fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             fontFamily = FontFamily.Monospace
                         )
                     }
                 }
 
-                // Controls row
+                // Center: Tracking Mode Toggle Chip
+                Surface(
+                    color = if (isTrackingModeEnabled) TargetAmber.copy(alpha = 0.18f) else SurfaceDark.copy(alpha = 0.85f),
+                    shape = RoundedCornerShape(20.dp),
+                    border = BorderDefaultsBorder(if (isTrackingModeEnabled) TargetAmber else Color.Gray.copy(alpha = 0.5f)),
+                    modifier = Modifier
+                        .clickable {
+                            isTrackingModeEnabled = !isTrackingModeEnabled
+                            objectTracker.setMode(
+                                if (isTrackingModeEnabled) TrackingMode.CONTINUOUS_TRACKING else TrackingMode.DETECTION_ONLY
+                            )
+                            val msg = if (isTrackingModeEnabled) {
+                                "Tracking Mode Enabled: IDs preserved across frames"
+                            } else {
+                                "Detection-Only Mode Enabled"
+                            }
+                            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                        }
+                        .testTag("tracking_mode_toggle_chip")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.TrackChanges,
+                            contentDescription = "Tracking Mode",
+                            tint = if (isTrackingModeEnabled) TargetAmber else Color.Gray,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = if (isTrackingModeEnabled) "TRACKING MODE" else "DETECT ONLY",
+                            color = if (isTrackingModeEnabled) TargetAmber else Color.Gray,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                }
+
+                // Right: Controls row
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     // Flashlight toggle
                     IconButton(
@@ -393,7 +437,7 @@ fun CameraPreviewScreen(
                             cameraInstance?.cameraControl?.enableTorch(isFlashOn)
                         },
                         modifier = Modifier
-                            .size(40.dp)
+                            .size(38.dp)
                             .background(SurfaceDark.copy(alpha = 0.85f), CircleShape)
                             .testTag("torch_toggle_button")
                     ) {
@@ -401,7 +445,7 @@ fun CameraPreviewScreen(
                             imageVector = if (isFlashOn) Icons.Default.FlashOn else Icons.Default.FlashOff,
                             contentDescription = "Toggle Torch",
                             tint = if (isFlashOn) TargetAmber else Color.White,
-                            modifier = Modifier.size(20.dp)
+                            modifier = Modifier.size(18.dp)
                         )
                     }
 
@@ -415,7 +459,7 @@ fun CameraPreviewScreen(
                             }
                         },
                         modifier = Modifier
-                            .size(40.dp)
+                            .size(38.dp)
                             .background(SurfaceDark.copy(alpha = 0.85f), CircleShape)
                             .testTag("switch_camera_button")
                     ) {
@@ -423,7 +467,7 @@ fun CameraPreviewScreen(
                             imageVector = Icons.Default.Cameraswitch,
                             contentDescription = "Switch Camera",
                             tint = Color.White,
-                            modifier = Modifier.size(20.dp)
+                            modifier = Modifier.size(18.dp)
                         )
                     }
 
@@ -431,7 +475,7 @@ fun CameraPreviewScreen(
                     IconButton(
                         onClick = { showSettingsDialog = true },
                         modifier = Modifier
-                            .size(40.dp)
+                            .size(38.dp)
                             .background(SurfaceDark.copy(alpha = 0.85f), CircleShape)
                             .testTag("settings_button")
                     ) {
@@ -439,7 +483,7 @@ fun CameraPreviewScreen(
                             imageVector = Icons.Default.Settings,
                             contentDescription = "Detection Settings",
                             tint = Color.White,
-                            modifier = Modifier.size(20.dp)
+                            modifier = Modifier.size(18.dp)
                         )
                     }
                 }
@@ -447,9 +491,9 @@ fun CameraPreviewScreen(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Prominent target indicator banner
+            // Prominent target indicator banner with consistent ID and duration
             Surface(
-                color = SurfaceDark.copy(alpha = 0.85f),
+                color = SurfaceDark.copy(alpha = 0.88f),
                 shape = RoundedCornerShape(12.dp),
                 border = BorderDefaultsBorder(
                     if (prominentObject != null) TargetAmber else CyberCyan.copy(alpha = 0.3f)
@@ -461,7 +505,10 @@ fun CameraPreviewScreen(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f)
+                    ) {
                         Icon(
                             imageVector = if (lockedTargetId != null) Icons.Default.Lock else Icons.Default.LockOpen,
                             contentDescription = "Target Lock Status",
@@ -469,17 +516,28 @@ fun CameraPreviewScreen(
                             modifier = Modifier.size(16.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = if (prominentObject != null) {
-                                val lockPrefix = if (lockedTargetId != null) "[MANUAL LOCK] " else "[PROMINENT TARGET] "
-                                "$lockPrefix${prominentObject?.label} (${prominentObject?.formattedScore()})"
-                            } else {
-                                "Scanning scene for objects..."
-                            },
-                            color = if (prominentObject != null) Color.White else Color.LightGray,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
+                        Column {
+                            Text(
+                                text = if (prominentObject != null) {
+                                    val lockPrefix = if (lockedTargetId != null) "[MANUAL LOCK] " else "[PROMINENT TARGET] "
+                                    "$lockPrefix${prominentObject?.label} (${prominentObject?.formattedScore()})"
+                                } else {
+                                    if (isTrackingModeEnabled) "Tracking Mode Active • Consistent IDs enabled" else "Scanning scene for objects..."
+                                },
+                                color = if (prominentObject != null) Color.White else Color.LightGray,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1
+                            )
+                            if (prominentObject != null && isTrackingModeEnabled) {
+                                Text(
+                                    text = "Consistent Track ID #${prominentObject?.id} • Tracked: ${prominentObject?.formattedTrackingDuration()}",
+                                    color = TargetAmberLight,
+                                    fontSize = 11.sp,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
+                        }
                     }
 
                     Text(
@@ -677,6 +735,41 @@ fun CameraPreviewScreen(
                                 colors = SwitchDefaults.colors(
                                     checkedThumbColor = CyberCyan,
                                     checkedTrackColor = CyberCyan.copy(alpha = 0.5f)
+                                )
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Object Tracking Mode",
+                                    color = Color.White,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = "Maintains consistent IDs across video frames",
+                                    color = Color.Gray,
+                                    fontSize = 12.sp
+                                )
+                            }
+                            Switch(
+                                checked = isTrackingModeEnabled,
+                                onCheckedChange = {
+                                    isTrackingModeEnabled = it
+                                    objectTracker.setMode(
+                                        if (it) TrackingMode.CONTINUOUS_TRACKING else TrackingMode.DETECTION_ONLY
+                                    )
+                                },
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = TargetAmber,
+                                    checkedTrackColor = TargetAmber.copy(alpha = 0.5f)
                                 )
                             )
                         }

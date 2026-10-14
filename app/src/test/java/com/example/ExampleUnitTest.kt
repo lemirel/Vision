@@ -115,4 +115,70 @@ class ExampleUnitTest {
         assertEquals(540f, rect.right, 0.5f)
         assertEquals(1152f, rect.bottom, 0.5f)
     }
+
+    @Test
+    fun testConsistentIdAcrossMultipleFrames() {
+        val tracker = ObjectTracker()
+        tracker.setMode(com.example.ml.TrackingMode.CONTINUOUS_TRACKING)
+
+        var initialId = -1
+
+        // Simulate 10 video frames with an object moving across the screen
+        for (i in 0 until 10) {
+            val offsetX = i * 0.02f
+            val objectInFrame = DetectedObject(
+                id = 999, // detector gave arbitrary raw index
+                label = "Laptop",
+                score = 0.90f,
+                boundingBox = RectF(0.2f + offsetX, 0.3f, 0.4f + offsetX, 0.5f)
+            )
+
+            val tracked = tracker.processFrame(listOf(objectInFrame), 1000L + (i * 33L))
+            assertEquals(1, tracked.size)
+            val trackedObj = tracked.first()
+
+            if (i == 0) {
+                initialId = trackedObj.id
+                assertTrue("Initial ID should be valid positive int", initialId > 0)
+            } else {
+                assertEquals(
+                    "Track ID must remain strictly consistent across frame $i",
+                    initialId,
+                    trackedObj.id
+                )
+                assertEquals(i + 1, trackedObj.ageInFrames)
+            }
+        }
+    }
+
+    @Test
+    fun testTemporaryOcclusionPreservesConsistentId() {
+        val tracker = ObjectTracker()
+        tracker.setMode(com.example.ml.TrackingMode.CONTINUOUS_TRACKING)
+
+        // Frame 1: Object present
+        val obj1 = DetectedObject(
+            id = 1,
+            label = "Cup",
+            score = 0.88f,
+            boundingBox = RectF(0.4f, 0.4f, 0.5f, 0.5f)
+        )
+        val f1 = tracker.processFrame(listOf(obj1), 1000L)
+        val originalId = f1.first().id
+
+        // Frame 2 & 3: Object occluded (empty detection)
+        tracker.processFrame(emptyList(), 1033L)
+        tracker.processFrame(emptyList(), 1500L)
+
+        // Frame 4: Object reappears slightly moved
+        val objReappear = DetectedObject(
+            id = 5,
+            label = "Cup",
+            score = 0.89f,
+            boundingBox = RectF(0.42f, 0.41f, 0.52f, 0.51f)
+        )
+        val f4 = tracker.processFrame(listOf(objReappear), 1700L)
+        assertEquals(1, f4.size)
+        assertEquals("Consistent ID must be preserved after temporary occlusion", originalId, f4.first().id)
+    }
 }

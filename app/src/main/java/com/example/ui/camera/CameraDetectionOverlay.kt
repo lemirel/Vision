@@ -238,11 +238,13 @@ private fun DrawScope.drawProminentObjectOverlay(
 
     // 5. Prominent Object Class Label Badge
     val confStr = if (showConfidence) " ${obj.formattedScore()}" else ""
-    val idStr = if (showTrackingId) "ID #${obj.id} • " else ""
+    val trackTag = if (obj.isTrackedAcrossFrames) "TRACKED ID #${obj.id}" else "ID #${obj.id}"
+    val idStr = if (showTrackingId) "$trackTag • " else ""
     val labelText = "🎯 ${obj.label.uppercase()}$confStr"
-    val subText = "$idStr${obj.formattedVelocity()}"
+    val durationStr = if (obj.isTrackedAcrossFrames && obj.trackingDurationMs > 500) " [${obj.formattedTrackingDuration()}]" else ""
+    val subText = "$idStr${obj.formattedVelocity()}$durationStr"
 
-    val badgeW = 260f
+    val badgeW = 280f
     val badgeH = 68f
     val badgeX = left.coerceIn(12f, containerW - badgeW - 12f)
     val badgeY = (top - badgeH - 12f).let { if (it < 110f) bottom + 12f else it }
