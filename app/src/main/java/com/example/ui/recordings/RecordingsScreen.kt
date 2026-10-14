@@ -82,6 +82,18 @@ import com.example.ui.theme.RecCrimson
 import com.example.ui.theme.SurfaceCardDark
 import com.example.ui.theme.SurfaceDark
 import com.example.ui.theme.TargetAmber
+import androidx.compose.foundation.Canvas
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.text.drawText
+import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
+import com.example.data.model.FrameTelemetry
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -243,6 +255,7 @@ fun RecordingsScreen(
         if (activePlaybackVideo != null) {
             VideoPlaybackDialog(
                 video = activePlaybackVideo!!,
+                videoRepository = videoRepository,
                 onDismiss = { activePlaybackVideo = null }
             )
         }
@@ -441,8 +454,37 @@ private fun VideoItemCard(
 @Composable
 private fun VideoPlaybackDialog(
     video: RecordedVideo,
+    videoRepository: VideoRepository,
     onDismiss: () -> Unit
 ) {
+    val context = LocalContext.current
+    var telemetryList by remember { mutableStateOf<List<FrameTelemetry>>(emptyList()) }
+    var currentTelemetry by remember { mutableStateOf<FrameTelemetry?>(null) }
+    var showOverlay by remember { mutableStateOf(true) }
+    var playbackError by remember { mutableStateOf<String?>(null) }
+    var videoViewRef by remember { mutableStateOf<VideoView?>(null) }
+    val textMeasurer = rememberTextMeasurer()
+
+    LaunchedEffect(video.filePath) {
+        telemetryList = videoRepository.loadVideoTelemetry(video.filePath)
+    }
+
+    LaunchedEffect(videoViewRef, telemetryList) {
+        val vv = videoViewRef ?: return@LaunchedEffect
+        while (isActive) {
+            try {
+                if (vv.isPlaying && telemetryList.isNotEmpty()) {
+                    val pos = vv.currentPosition.toLong()
+                    currentTelemetry = telemetryList.minByOrNull { kotlin.math.abs(it.timeMs - pos) }
+                        ?.takeIf { kotlin.math.abs(it.timeMs - pos) < 800 }
+                }
+            } catch (e: Exception) {
+                // Ignore transient player state exceptions
+            }
+            delay(50)
+        }
+    }
+
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
@@ -457,7 +499,7 @@ private fun VideoPlaybackDialog(
                 modifier = Modifier.fillMaxSize(),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                // Header with Close Button
+                // Header with Controls and Close Button
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -465,34 +507,62 @@ private fun VideoPlaybackDialog(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = video.fileName,
                             color = Color.White,
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1
                         )
                         Text(
-                            text = "Showing burned-in tracking HUD and prominent object target reticle",
+                            text = if (telemetryList.isNotEmpty()) {
+                                "Synchronized Prominent Object Tracking HUD (${telemetryList.size} frames)"
+                            } else {
+                                "Live camera recording playback"
+                            },
                             color = TargetAmber,
                             fontSize = 11.sp
                         )
                     }
 
-                    IconButton(
-                        onClick = onDismiss,
-                        modifier = Modifier
-                            .background(SurfaceDark, CircleShape)
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Close,
-                            contentDescription = "Close",
-                            tint = Color.White
-                        )
+                        if (telemetryList.isNotEmpty()) {
+                            IconButton(
+                                onClick = { showOverlay = !showOverlay },
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .background(SurfaceDark, CircleShape)
+                            ) {
+                                Icon(
+                                    imageVector = if (showOverlay) Icons.Default.Visibility else Icons.Default.VisibilityOff,
+                                    contentDescription = "Toggle HUD Overlay",
+                                    tint = if (showOverlay) TargetAmber else Color.Gray,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+
+                        IconButton(
+                            onClick = onDismiss,
+                            modifier = Modifier
+                                .size(36.dp)
+                                .background(SurfaceDark, CircleShape)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Close",
+                                tint = Color.White,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
                     }
                 }
 
-                // Video View Player
+                // Video Player with Tracking Overlay
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -508,14 +578,121 @@ private fun VideoPlaybackDialog(
                                 val mediaController = MediaController(ctx)
                                 mediaController.setAnchorView(this)
                                 setMediaController(mediaController)
+                                setOnErrorListener { _, what, extra ->
+                                    playbackError = "Playback issue (code $what:$extra). Please record a fresh video."
+                                    true
+                                }
                                 setOnPreparedListener { mp ->
                                     mp.isLooping = true
                                     start()
                                 }
+                                videoViewRef = this
                             }
                         },
                         modifier = Modifier.fillMaxSize()
                     )
+
+                    // Synchronized Prominent Object Tracking HUD Overlay
+                    if (showOverlay && currentTelemetry != null && playbackError == null) {
+                        val frame = currentTelemetry!!
+                        Canvas(modifier = Modifier.fillMaxSize()) {
+                            val w = size.width
+                            val h = size.height
+
+                            val left = (frame.left * w).coerceIn(0f, w)
+                            val top = (frame.top * h).coerceIn(0f, h)
+                            val right = (frame.right * w).coerceIn(left + 20f, w)
+                            val bottom = (frame.bottom * h).coerceIn(top + 20f, h)
+                            val boxW = right - left
+                            val boxH = bottom - top
+
+                            // Cyber Target Amber Box
+                            drawRect(
+                                color = TargetAmber.copy(alpha = 0.85f),
+                                topLeft = Offset(left, top),
+                                size = Size(boxW, boxH),
+                                style = Stroke(width = 2.5f)
+                            )
+
+                            // Corner Target Brackets
+                            val cornerLen = (boxW.coerceAtMost(boxH) * 0.25f).coerceIn(12f, 36f)
+                            val bracketStroke = 4f
+                            // Top-left
+                            drawLine(TargetAmber, Offset(left, top), Offset(left + cornerLen, top), bracketStroke)
+                            drawLine(TargetAmber, Offset(left, top), Offset(left, top + cornerLen), bracketStroke)
+                            // Top-right
+                            drawLine(TargetAmber, Offset(right, top), Offset(right - cornerLen, top), bracketStroke)
+                            drawLine(TargetAmber, Offset(right, top), Offset(right, top + cornerLen), bracketStroke)
+                            // Bottom-left
+                            drawLine(TargetAmber, Offset(left, bottom), Offset(left + cornerLen, bottom), bracketStroke)
+                            drawLine(TargetAmber, Offset(left, bottom), Offset(left, bottom - cornerLen), bracketStroke)
+                            // Bottom-right
+                            drawLine(TargetAmber, Offset(right, bottom), Offset(right - cornerLen, bottom), bracketStroke)
+                            drawLine(TargetAmber, Offset(right, bottom), Offset(right, bottom - cornerLen), bracketStroke)
+
+                            // Center Reticle
+                            val cx = (left + right) / 2f
+                            val cy = (top + bottom) / 2f
+                            drawLine(TargetAmber.copy(alpha = 0.6f), Offset(cx - 10f, cy), Offset(cx + 10f, cy), 2f)
+                            drawLine(TargetAmber.copy(alpha = 0.6f), Offset(cx, cy - 10f), Offset(cx, cy + 10f), 2f)
+
+                            // Telemetry Badge Text
+                            val infoText = "${frame.label} #${frame.trackId} • ${(frame.score * 100).toInt()}% • ${frame.velocity}"
+                            val textLayout = textMeasurer.measure(
+                                text = infoText,
+                                style = TextStyle(
+                                    color = Color.White,
+                                    fontSize = 11.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            )
+
+                            val badgePad = 8f
+                            val badgeW = textLayout.size.width + badgePad * 2
+                            val badgeH = textLayout.size.height + badgePad * 2
+                            val badgeY = (top - badgeH - 4f).coerceAtLeast(8f)
+
+                            drawRect(
+                                color = Color.Black.copy(alpha = 0.85f),
+                                topLeft = Offset(left, badgeY),
+                                size = Size(badgeW, badgeH)
+                            )
+                            drawRect(
+                                color = TargetAmber,
+                                topLeft = Offset(left, badgeY),
+                                size = Size(badgeW, badgeH),
+                                style = Stroke(width = 1.5f)
+                            )
+                            drawText(
+                                textMeasurer = textMeasurer,
+                                text = infoText,
+                                topLeft = Offset(left + badgePad, badgeY + badgePad),
+                                style = TextStyle(
+                                    color = Color.White,
+                                    fontSize = 11.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            )
+                        }
+                    }
+
+                    if (playbackError != null) {
+                        Surface(
+                            color = Color.Black.copy(alpha = 0.85f),
+                            shape = RoundedCornerShape(12.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, RecCrimson),
+                            modifier = Modifier.padding(24.dp)
+                        ) {
+                            Text(
+                                text = playbackError!!,
+                                color = Color.White,
+                                fontSize = 13.sp,
+                                modifier = Modifier.padding(16.dp)
+                            )
+                        }
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(16.dp))
@@ -523,7 +700,7 @@ private fun VideoPlaybackDialog(
                 // Share Button inside Player
                 Button(
                     onClick = {
-                        shareVideo(null, video)
+                        shareVideo(context, video)
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = CyberCyan),
                     shape = RoundedCornerShape(20.dp),
@@ -542,15 +719,14 @@ private fun VideoPlaybackDialog(
     }
 }
 
-private fun shareVideo(context: Context?, video: RecordedVideo) {
+private fun shareVideo(context: Context, video: RecordedVideo) {
     val file = File(video.filePath)
     if (!file.exists()) return
 
-    val targetContext = context ?: return
     try {
         val uri = FileProvider.getUriForFile(
-            targetContext,
-            "${targetContext.packageName}.fileprovider",
+            context,
+            "${context.packageName}.fileprovider",
             file
         )
         val intent = Intent(Intent.ACTION_SEND).apply {
@@ -558,8 +734,8 @@ private fun shareVideo(context: Context?, video: RecordedVideo) {
             putExtra(Intent.EXTRA_STREAM, uri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-        targetContext.startActivity(Intent.createChooser(intent, "Share Tracking Video"))
+        context.startActivity(Intent.createChooser(intent, "Share Tracking Video"))
     } catch (e: Exception) {
-        Toast.makeText(targetContext, "Share error: ${e.message}", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, "Share error: ${e.message}", Toast.LENGTH_SHORT).show()
     }
 }

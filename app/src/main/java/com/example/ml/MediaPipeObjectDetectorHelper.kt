@@ -105,11 +105,19 @@ class MediaPipeObjectDetectorHelper(
         }
     }
 
+    private var lastLiveTimestampMs = 0L
+
     fun detectLiveStream(bitmap: Bitmap, timestampMs: Long) {
         val detector = liveStreamDetector ?: return
         try {
+            val validTimestamp = if (timestampMs <= lastLiveTimestampMs) {
+                lastLiveTimestampMs + 1
+            } else {
+                timestampMs
+            }
+            lastLiveTimestampMs = validTimestamp
             val mpImage = BitmapImageBuilder(bitmap).build()
-            detector.detectAsync(mpImage, timestampMs)
+            detector.detectAsync(mpImage, validTimestamp)
         } catch (e: Exception) {
             Log.e(TAG, "detectLiveStream failed: ${e.message}", e)
         }

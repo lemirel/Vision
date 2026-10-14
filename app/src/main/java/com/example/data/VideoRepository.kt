@@ -69,12 +69,47 @@ class VideoRepository(private val context: Context) {
     suspend fun deleteVideo(filePath: String): Boolean = withContext(Dispatchers.IO) {
         try {
             val file = File(filePath)
+            val metaFile = File(file.parentFile, "${file.nameWithoutExtension}.meta")
+            if (metaFile.exists()) metaFile.delete()
+
             if (file.exists()) {
                 file.delete()
             } else false
         } catch (e: Exception) {
             Log.e(TAG, "Failed to delete video: $filePath", e)
             false
+        }
+    }
+
+    suspend fun loadVideoTelemetry(filePath: String): List<com.example.data.model.FrameTelemetry> = withContext(Dispatchers.IO) {
+        val file = File(filePath)
+        val metaFile = File(file.parentFile, "${file.nameWithoutExtension}.meta")
+        if (!metaFile.exists()) return@withContext emptyList()
+
+        try {
+            val content = metaFile.readText()
+            val jsonArray = org.json.JSONArray(content)
+            val result = mutableListOf<com.example.data.model.FrameTelemetry>()
+            for (i in 0 until jsonArray.length()) {
+                val obj = jsonArray.getJSONObject(i)
+                result.add(
+                    com.example.data.model.FrameTelemetry(
+                        timeMs = obj.getLong("t"),
+                        label = obj.getString("l"),
+                        score = obj.getDouble("s").toFloat(),
+                        left = obj.getDouble("x1").toFloat(),
+                        top = obj.getDouble("y1").toFloat(),
+                        right = obj.getDouble("x2").toFloat(),
+                        bottom = obj.getDouble("y2").toFloat(),
+                        velocity = obj.optString("v", "Stationary"),
+                        trackId = obj.optInt("id", 1)
+                    )
+                )
+            }
+            result
+        } catch (e: Exception) {
+            Log.e(TAG, "Error parsing telemetry file: ${metaFile.name}", e)
+            emptyList()
         }
     }
 }

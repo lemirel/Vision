@@ -212,7 +212,7 @@ fun CameraPreviewScreen(
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
     val previewView = remember {
         PreviewView(context).apply {
-            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+            implementationMode = PreviewView.ImplementationMode.PERFORMANCE
             scaleType = PreviewView.ScaleType.FILL_CENTER
         }
     }
@@ -251,7 +251,7 @@ fun CameraPreviewScreen(
             .background(Color.Black)
             .testTag("camera_preview_screen")
     ) {
-        // 1. Live Camera Preview View with COMPATIBLE texture-backed mode
+        // 1. Live Camera Preview View with high-performance SurfaceView mode
         AndroidView(
             factory = { previewView },
             modifier = Modifier.fillMaxSize()
@@ -269,7 +269,6 @@ fun CameraPreviewScreen(
 
             val imageAnalysis = ImageAnalysis.Builder()
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                 .build()
 
             imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
@@ -294,7 +293,7 @@ fun CameraPreviewScreen(
                     mediaPipeHelper.detectLiveStream(rotatedBitmap, timestamp)
 
                     if (videoRecorder.isCurrentlyRecording()) {
-                        videoRecorder.submitFrame(rotatedBitmap, prominentObject, detectedObjects.size)
+                        videoRecorder.submitFrameTelemetry(prominentObject)
                     }
                 } catch (e: Exception) {
                     Log.e("CameraPreviewScreen", "Analyzer error", e)
@@ -309,14 +308,27 @@ fun CameraPreviewScreen(
 
             try {
                 cameraProvider.unbindAll()
+                val videoCapture = videoRecorder.createVideoCapture()
                 cameraInstance = cameraProvider.bindToLifecycle(
                     lifecycleOwner,
                     cameraSelector,
                     preview,
-                    imageAnalysis
+                    imageAnalysis,
+                    videoCapture
                 )
             } catch (e: Exception) {
-                Log.e("CameraPreviewScreen", "Use case binding failed", e)
+                Log.e("CameraPreviewScreen", "Use case binding with VideoCapture failed, falling back: ${e.message}", e)
+                try {
+                    cameraProvider.unbindAll()
+                    cameraInstance = cameraProvider.bindToLifecycle(
+                        lifecycleOwner,
+                        cameraSelector,
+                        preview,
+                        imageAnalysis
+                    )
+                } catch (fallbackEx: Exception) {
+                    Log.e("CameraPreviewScreen", "Fallback binding failed: ${fallbackEx.message}", fallbackEx)
+                }
             }
         }
 
@@ -606,19 +618,20 @@ fun CameraPreviewScreen(
                 // Record/Stop Button
                 Button(
                     onClick = {
-                        scope.launch {
-                            if (!isRecording) {
-                                val savedFile = videoRecorder.startRecording()
-                                if (savedFile != null) {
+                        if (!isRecording) {
+                            videoRecorder.startRecording(
+                                onStarted = {
                                     isRecording = true
-                                    Toast.makeText(context, "Recording prominent object tracking...", Toast.LENGTH_SHORT).show()
-                                } else {
-                                    Toast.makeText(context, "Failed to start recording", Toast.LENGTH_SHORT).show()
+                                    Toast.makeText(context, "Recording video with prominent object tracking...", Toast.LENGTH_SHORT).show()
+                                },
+                                onError = { error ->
+                                    Toast.makeText(context, "Recording failed: $error", Toast.LENGTH_SHORT).show()
                                 }
-                            } else {
-                                isRecording = false
-                                Toast.makeText(context, "Finalizing & saving video...", Toast.LENGTH_SHORT).show()
-                                val file = videoRecorder.stopRecording()
+                            )
+                        } else {
+                            isRecording = false
+                            Toast.makeText(context, "Finalizing & saving video...", Toast.LENGTH_SHORT).show()
+                            videoRecorder.stopRecording { file ->
                                 if (file != null) {
                                     Toast.makeText(context, "Tracking video saved to gallery!", Toast.LENGTH_LONG).show()
                                     onVideoSaved()
