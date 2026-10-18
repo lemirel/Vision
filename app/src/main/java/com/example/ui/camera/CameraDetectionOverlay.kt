@@ -44,9 +44,17 @@ enum class OverlayStyle {
 }
 
 /**
- * Visual overlay composable that renders bounding boxes, class labels,
- * confidence tags, tracking trajectories, and target reticles directly
- * onto the CameraX live preview stream based on MediaPipe object detection.
+ * Custom overlay component that draws bounding boxes, classification labels,
+ * confidence scores, tracking identifiers, and trajectories in real-time based on
+ * MediaPipe object detection results.
+ *
+ * Features:
+ * - Real-time continuous rendering mapped to camera viewport dimensions.
+ * - Aspect-ratio aware coordinate scaling with fill-center crop support.
+ * - Front camera horizontal mirroring support.
+ * - Dynamic text measurement avoiding badge clipping or text overflow.
+ * - Multiple visual styles: CYBER_HUD, CLEAN_BOX, TARGET_RETICLE.
+ * - Interactive tap-to-lock gesture recognition.
  */
 @Composable
 fun CameraDetectionOverlay(
@@ -54,6 +62,7 @@ fun CameraDetectionOverlay(
     prominentObject: DetectedObject?,
     sourceImageWidth: Int = 0,
     sourceImageHeight: Int = 0,
+    isFrontCamera: Boolean = false,
     overlayStyle: OverlayStyle = OverlayStyle.CYBER_HUD,
     showConfidence: Boolean = true,
     showTrackingId: Boolean = true,
@@ -67,7 +76,7 @@ fun CameraDetectionOverlay(
     // Smooth pulse animation for prominent target reticle
     val infiniteTransition = rememberInfiniteTransition(label = "reticle_pulse")
     val pulseGlow by infiniteTransition.animateFloat(
-        initialValue = 0.25f,
+        initialValue = 0.20f,
         targetValue = 0.55f,
         animationSpec = infiniteRepeatable(
             animation = tween(700, easing = FastOutSlowInEasing),
@@ -80,24 +89,32 @@ fun CameraDetectionOverlay(
         modifier = modifier
             .fillMaxSize()
             .testTag("camera_detection_overlay")
-            .pointerInput(detectedObjects, sourceImageWidth, sourceImageHeight) {
+            .pointerInput(detectedObjects, sourceImageWidth, sourceImageHeight, isFrontCamera) {
                 detectTapGestures { offset ->
                     val containerW = size.width.toFloat()
                     val containerH = size.height.toFloat()
 
-                    // Find object whose mapped bounding box contains touch offset
+                    // Find object whose mapped bounding box contains touch offset (with 24dp touch pad)
                     val tapped = detectedObjects.firstOrNull { obj ->
                         val rect = mapToPreviewCoordinates(
-                            obj.boundingBox.left,
-                            obj.boundingBox.top,
-                            obj.boundingBox.right,
-                            obj.boundingBox.bottom,
-                            containerW,
-                            containerH,
-                            sourceImageWidth,
-                            sourceImageHeight
+                            normLeft = obj.boundingBox.left,
+                            normTop = obj.boundingBox.top,
+                            normRight = obj.boundingBox.right,
+                            normBottom = obj.boundingBox.bottom,
+                            containerW = containerW,
+                            containerH = containerH,
+                            sourceW = sourceImageWidth,
+                            sourceH = sourceImageHeight,
+                            isFrontCamera = isFrontCamera
                         )
-                        rect.contains(offset)
+                        // Expand hit rect slightly for comfortable touch targeting
+                        val hitRect = Rect(
+                            rect.left - 24f,
+                            rect.top - 24f,
+                            rect.right + 24f,
+                            rect.bottom + 24f
+                        )
+                        hitRect.contains(offset)
                     }
 
                     if (tapped != null) {
@@ -113,14 +130,15 @@ fun CameraDetectionOverlay(
 
         for (obj in detectedObjects) {
             val rect = mapToPreviewCoordinates(
-                obj.boundingBox.left,
-                obj.boundingBox.top,
-                obj.boundingBox.right,
-                obj.boundingBox.bottom,
-                containerW,
-                containerH,
-                sourceImageWidth,
-                sourceImageHeight
+                normLeft = obj.boundingBox.left,
+                normTop = obj.boundingBox.top,
+                normRight = obj.boundingBox.right,
+                normBottom = obj.boundingBox.bottom,
+                containerW = containerW,
+                containerH = containerH,
+                sourceW = sourceImageWidth,
+                sourceH = sourceImageHeight,
+                isFrontCamera = isFrontCamera
             )
 
             if (obj.isProminent) {
@@ -131,6 +149,7 @@ fun CameraDetectionOverlay(
                     containerH = containerH,
                     sourceImageWidth = sourceImageWidth,
                     sourceImageHeight = sourceImageHeight,
+                    isFrontCamera = isFrontCamera,
                     pulseGlow = pulseGlow,
                     overlayStyle = overlayStyle,
                     showConfidence = showConfidence,
@@ -160,6 +179,7 @@ private fun DrawScope.drawProminentObjectOverlay(
     containerH: Float,
     sourceImageWidth: Int,
     sourceImageHeight: Int,
+    isFrontCamera: Boolean,
     pulseGlow: Float,
     overlayStyle: OverlayStyle,
     showConfidence: Boolean,
@@ -179,11 +199,17 @@ private fun DrawScope.drawProminentObjectOverlay(
         val path = Path()
         obj.trajectory.forEachIndexed { i, pt ->
             val mappedPt = mapPointToPreview(
-                pt.x, pt.y, containerW, containerH, sourceImageWidth, sourceImageHeight
+                normX = pt.x,
+                normY = pt.y,
+                containerW = containerW,
+                containerH = containerH,
+                sourceW = sourceImageWidth,
+                sourceH = sourceImageHeight,
+                isFrontCamera = isFrontCamera
             )
             if (i == 0) path.moveTo(mappedPt.x, mappedPt.y) else path.lineTo(mappedPt.x, mappedPt.y)
 
-            val pointRadius = 2.5f + (i * 0.2f)
+            val pointRadius = 2.5f + (i * 0.25f)
             drawCircle(
                 color = NeonCyanLight,
                 radius = pointRadius,
@@ -197,46 +223,89 @@ private fun DrawScope.drawProminentObjectOverlay(
         )
     }
 
-    // 2. Glowing bounding box halo
-    drawRoundRect(
-        color = TargetAmber.copy(alpha = pulseGlow),
-        topLeft = Offset(left - 4, top - 4),
-        size = Size(boxW + 8, boxH + 8),
-        cornerRadius = CornerRadius(12f, 12f),
-        style = Stroke(width = 8f)
-    )
+    when (overlayStyle) {
+        OverlayStyle.CYBER_HUD -> {
+            // Glowing bounding box halo
+            drawRoundRect(
+                color = TargetAmber.copy(alpha = pulseGlow),
+                topLeft = Offset(left - 4, top - 4),
+                size = Size(boxW + 8, boxH + 8),
+                cornerRadius = CornerRadius(12f, 12f),
+                style = Stroke(width = 8f)
+            )
 
-    // 3. High-Tech Corner Target Brackets
-    val bracketLen = min(boxW, boxH) * 0.28f
-    val bracketColor = TargetAmber
-    val bracketStroke = 6f
+            // High-Tech Corner Target Brackets
+            val bracketLen = min(boxW, boxH) * 0.28f
+            val bracketColor = TargetAmber
+            val bracketStroke = 6f
 
-    // Top-Left corner
-    drawLine(bracketColor, Offset(left, top), Offset(left + bracketLen, top), bracketStroke)
-    drawLine(bracketColor, Offset(left, top), Offset(left, top + bracketLen), bracketStroke)
-    // Top-Right corner
-    drawLine(bracketColor, Offset(right, top), Offset(right - bracketLen, top), bracketStroke)
-    drawLine(bracketColor, Offset(right, top), Offset(right, top + bracketLen), bracketStroke)
-    // Bottom-Left corner
-    drawLine(bracketColor, Offset(left, bottom), Offset(left + bracketLen, bottom), bracketStroke)
-    drawLine(bracketColor, Offset(left, bottom), Offset(left, bottom - bracketLen), bracketStroke)
-    // Bottom-Right corner
-    drawLine(bracketColor, Offset(right, bottom), Offset(right - bracketLen, bottom), bracketStroke)
-    drawLine(bracketColor, Offset(right, bottom), Offset(right, bottom - bracketLen), bracketStroke)
+            // Top-Left corner
+            drawLine(bracketColor, Offset(left, top), Offset(left + bracketLen, top), bracketStroke)
+            drawLine(bracketColor, Offset(left, top), Offset(left, top + bracketLen), bracketStroke)
+            // Top-Right corner
+            drawLine(bracketColor, Offset(right, top), Offset(right - bracketLen, top), bracketStroke)
+            drawLine(bracketColor, Offset(right, top), Offset(right, top + bracketLen), bracketStroke)
+            // Bottom-Left corner
+            drawLine(bracketColor, Offset(left, bottom), Offset(left + bracketLen, bottom), bracketStroke)
+            drawLine(bracketColor, Offset(left, bottom), Offset(left, bottom - bracketLen), bracketStroke)
+            // Bottom-Right corner
+            drawLine(bracketColor, Offset(right, bottom), Offset(right - bracketLen, bottom), bracketStroke)
+            drawLine(bracketColor, Offset(right, bottom), Offset(right, bottom - bracketLen), bracketStroke)
 
-    // 4. Center Target Reticle & Crosshair
-    val cx = (left + right) / 2f
-    val cy = (top + bottom) / 2f
-    drawCircle(
-        color = TargetAmber,
-        radius = 16f,
-        center = Offset(cx, cy),
-        style = Stroke(width = 3f)
-    )
-    drawLine(TargetAmber, Offset(cx - 24f, cy), Offset(cx + 24f, cy), 3f)
-    drawLine(TargetAmber, Offset(cx, cy - 24f), Offset(cx, cy + 24f), 3f)
+            // Center Target Reticle & Crosshair
+            val cx = (left + right) / 2f
+            val cy = (top + bottom) / 2f
+            drawCircle(
+                color = TargetAmber,
+                radius = 16f,
+                center = Offset(cx, cy),
+                style = Stroke(width = 3f)
+            )
+            drawLine(TargetAmber, Offset(cx - 24f, cy), Offset(cx + 24f, cy), 3f)
+            drawLine(TargetAmber, Offset(cx, cy - 24f), Offset(cx, cy + 24f), 3f)
+        }
 
-    // 5. Prominent Object Class Label Badge
+        OverlayStyle.CLEAN_BOX -> {
+            // Minimalist clean pill bounding box
+            drawRoundRect(
+                color = TargetAmber.copy(alpha = 0.12f),
+                topLeft = Offset(left, top),
+                size = Size(boxW, boxH),
+                cornerRadius = CornerRadius(12f, 12f)
+            )
+            drawRoundRect(
+                color = TargetAmber,
+                topLeft = Offset(left, top),
+                size = Size(boxW, boxH),
+                cornerRadius = CornerRadius(12f, 12f),
+                style = Stroke(width = 3.5f)
+            )
+        }
+
+        OverlayStyle.TARGET_RETICLE -> {
+            // Precision tactical reticle
+            val cx = (left + right) / 2f
+            val cy = (top + bottom) / 2f
+            val radius = min(boxW, boxH) * 0.5f
+
+            drawCircle(
+                color = TargetAmber.copy(alpha = pulseGlow),
+                radius = radius + 6f,
+                center = Offset(cx, cy),
+                style = Stroke(width = 6f)
+            )
+            drawCircle(
+                color = TargetAmber,
+                radius = radius,
+                center = Offset(cx, cy),
+                style = Stroke(width = 2.5f)
+            )
+            drawLine(TargetAmber, Offset(cx - radius - 16f, cy), Offset(cx + radius + 16f, cy), 2.5f)
+            drawLine(TargetAmber, Offset(cx, cy - radius - 16f), Offset(cx, cy + radius + 16f), 2.5f)
+        }
+    }
+
+    // Prominent Object Class Label Badge (Dynamically measured)
     val confStr = if (showConfidence) " ${obj.formattedScore()}" else ""
     val trackTag = if (obj.isTrackedAcrossFrames) "TRACKED ID #${obj.id}" else "ID #${obj.id}"
     val idStr = if (showTrackingId) "$trackTag • " else ""
@@ -244,10 +313,30 @@ private fun DrawScope.drawProminentObjectOverlay(
     val durationStr = if (obj.isTrackedAcrossFrames && obj.trackingDurationMs > 500) " [${obj.formattedTrackingDuration()}]" else ""
     val subText = "$idStr${obj.formattedVelocity()}$durationStr"
 
-    val badgeW = 280f
-    val badgeH = 68f
-    val badgeX = left.coerceIn(12f, containerW - badgeW - 12f)
-    val badgeY = (top - badgeH - 12f).let { if (it < 110f) bottom + 12f else it }
+    val labelLayout = textMeasurer.measure(
+        text = labelText,
+        style = TextStyle(
+            color = Color.White,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
+            fontFamily = FontFamily.Monospace
+        )
+    )
+    val subLayout = textMeasurer.measure(
+        text = subText,
+        style = TextStyle(
+            color = TargetAmberLight,
+            fontSize = 10.sp,
+            fontFamily = FontFamily.Monospace
+        )
+    )
+
+    val padH = 12f
+    val padV = 8f
+    val badgeW = maxOf(labelLayout.size.width, subLayout.size.width) + padH * 2
+    val badgeH = labelLayout.size.height + subLayout.size.height + padV * 2 + 4f
+    val badgeX = left.coerceIn(8f, (containerW - badgeW - 8f).coerceAtLeast(8f))
+    val badgeY = if (top - badgeH - 10f < 80f) bottom + 10f else top - badgeH - 10f
 
     drawRoundRect(
         color = SurfaceDark.copy(alpha = 0.92f),
@@ -266,10 +355,10 @@ private fun DrawScope.drawProminentObjectOverlay(
     drawText(
         textMeasurer = textMeasurer,
         text = labelText,
-        topLeft = Offset(badgeX + 12f, badgeY + 8f),
+        topLeft = Offset(badgeX + padH, badgeY + padV),
         style = TextStyle(
             color = Color.White,
-            fontSize = 13.sp,
+            fontSize = 12.sp,
             fontWeight = FontWeight.Bold,
             fontFamily = FontFamily.Monospace
         )
@@ -277,10 +366,10 @@ private fun DrawScope.drawProminentObjectOverlay(
     drawText(
         textMeasurer = textMeasurer,
         text = subText,
-        topLeft = Offset(badgeX + 12f, badgeY + 36f),
+        topLeft = Offset(badgeX + padH, badgeY + padV + labelLayout.size.height + 4f),
         style = TextStyle(
             color = TargetAmberLight,
-            fontSize = 11.sp,
+            fontSize = 10.sp,
             fontFamily = FontFamily.Monospace
         )
     )
@@ -304,57 +393,90 @@ private fun DrawScope.drawStandardObjectOverlay(
 
     val objColor = Color(obj.colorArgb)
 
-    // Rounded bounding box
-    drawRoundRect(
-        color = objColor.copy(alpha = 0.85f),
-        topLeft = Offset(left, top),
-        size = Size(boxW, boxH),
-        cornerRadius = CornerRadius(8f, 8f),
-        style = Stroke(width = 3f)
-    )
+    when (overlayStyle) {
+        OverlayStyle.CYBER_HUD, OverlayStyle.TARGET_RETICLE -> {
+            // Cyber bounding box with corner accents
+            drawRoundRect(
+                color = objColor.copy(alpha = 0.85f),
+                topLeft = Offset(left, top),
+                size = Size(boxW, boxH),
+                cornerRadius = CornerRadius(8f, 8f),
+                style = Stroke(width = 3f)
+            )
 
-    // Corner highlights
-    val cornerLen = min(boxW, boxH) * 0.18f
-    if (cornerLen > 8f) {
-        val thickStroke = 5f
-        drawLine(objColor, Offset(left, top), Offset(left + cornerLen, top), thickStroke)
-        drawLine(objColor, Offset(left, top), Offset(left, top + cornerLen), thickStroke)
-        drawLine(objColor, Offset(right, top), Offset(right - cornerLen, top), thickStroke)
-        drawLine(objColor, Offset(right, top), Offset(right, top + cornerLen), thickStroke)
+            val cornerLen = min(boxW, boxH) * 0.20f
+            if (cornerLen > 8f) {
+                val thickStroke = 5f
+                drawLine(objColor, Offset(left, top), Offset(left + cornerLen, top), thickStroke)
+                drawLine(objColor, Offset(left, top), Offset(left, top + cornerLen), thickStroke)
+                drawLine(objColor, Offset(right, top), Offset(right - cornerLen, top), thickStroke)
+                drawLine(objColor, Offset(right, top), Offset(right, top + cornerLen), thickStroke)
+            }
+        }
+
+        OverlayStyle.CLEAN_BOX -> {
+            // Minimalist clean pill box with subtle translucent tint
+            drawRoundRect(
+                color = objColor.copy(alpha = 0.08f),
+                topLeft = Offset(left, top),
+                size = Size(boxW, boxH),
+                cornerRadius = CornerRadius(8f, 8f)
+            )
+            drawRoundRect(
+                color = objColor.copy(alpha = 0.85f),
+                topLeft = Offset(left, top),
+                size = Size(boxW, boxH),
+                cornerRadius = CornerRadius(8f, 8f),
+                style = Stroke(width = 2.5f)
+            )
+        }
     }
 
-    // Class label tag
+    // Class label tag (Dynamically measured to avoid clipping)
     val confPart = if (showConfidence) " ${obj.formattedScore()}" else ""
     val idPart = if (showTrackingId) "#${obj.id} " else ""
     val label = "$idPart${obj.label}$confPart"
 
-    val badgeW = 160f
-    val badgeH = 36f
-    val badgeX = left.coerceIn(8f, containerW - badgeW - 8f)
-    val badgeY = (top - badgeH - 6f).coerceAtLeast(80f)
+    val textLayout = textMeasurer.measure(
+        text = label,
+        style = TextStyle(
+            color = Color.White,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+            fontFamily = FontFamily.Monospace
+        )
+    )
+
+    val badgePadH = 8f
+    val badgePadV = 4f
+    val badgeW = textLayout.size.width + badgePadH * 2
+    val badgeH = textLayout.size.height + badgePadV * 2
+    val badgeX = left.coerceIn(8f, (containerW - badgeW - 8f).coerceAtLeast(8f))
+    val badgeY = if (top - badgeH - 6f < 70f) bottom + 6f else top - badgeH - 6f
 
     drawRoundRect(
-        color = SurfaceDark.copy(alpha = 0.85f),
+        color = SurfaceDark.copy(alpha = 0.88f),
         topLeft = Offset(badgeX, badgeY),
         size = Size(badgeW, badgeH),
         cornerRadius = CornerRadius(6f, 6f)
     )
     drawRoundRect(
-        color = objColor.copy(alpha = 0.6f),
+        color = objColor.copy(alpha = 0.75f),
         topLeft = Offset(badgeX, badgeY),
         size = Size(badgeW, badgeH),
         cornerRadius = CornerRadius(6f, 6f),
-        style = Stroke(width = 1f)
+        style = Stroke(width = 1.5f)
     )
 
     drawText(
         textMeasurer = textMeasurer,
         text = label,
-        topLeft = Offset(badgeX + 8f, badgeY + 8f),
+        topLeft = Offset(badgeX + badgePadH, badgeY + badgePadV),
         style = TextStyle(
             color = Color.White,
             fontSize = 11.sp,
-            fontWeight = FontWeight.SemiBold
+            fontWeight = FontWeight.SemiBold,
+            fontFamily = FontFamily.Monospace
         )
     )
 }
@@ -362,7 +484,8 @@ private fun DrawScope.drawStandardObjectOverlay(
 /**
  * Maps normalized coordinates from MediaPipe ImageAnalysis [0..1]
  * into the visible Viewport / PreviewView coordinates.
- * Handles FILL_CENTER (aspect ratio cropping and centering).
+ * Handles FILL_CENTER (aspect ratio cropping and centering) and
+ * front camera mirror flipping.
  */
 fun mapToPreviewCoordinates(
     normLeft: Float,
@@ -372,13 +495,16 @@ fun mapToPreviewCoordinates(
     containerW: Float,
     containerH: Float,
     sourceW: Int,
-    sourceH: Int
+    sourceH: Int,
+    isFrontCamera: Boolean = false
 ): Rect {
     if (sourceW <= 0 || sourceH <= 0) {
+        val l = if (isFrontCamera) (1f - normRight) * containerW else normLeft * containerW
+        val r = if (isFrontCamera) (1f - normLeft) * containerW else normRight * containerW
         return Rect(
-            left = normLeft * containerW,
+            left = minOf(l, r),
             top = normTop * containerH,
-            right = normRight * containerW,
+            right = maxOf(l, r),
             bottom = normBottom * containerH
         )
     }
@@ -389,9 +515,12 @@ fun mapToPreviewCoordinates(
     val offsetX = (containerW - scaledW) / 2f
     val offsetY = (containerH - scaledH) / 2f
 
-    val left = offsetX + normLeft * scaledW
+    val rawLeft = if (isFrontCamera) (1f - normRight) else normLeft
+    val rawRight = if (isFrontCamera) (1f - normLeft) else normRight
+
+    val left = offsetX + minOf(rawLeft, rawRight) * scaledW
     val top = offsetY + normTop * scaledH
-    val right = offsetX + normRight * scaledW
+    val right = offsetX + maxOf(rawLeft, rawRight) * scaledW
     val bottom = offsetY + normBottom * scaledH
 
     return Rect(left, top, right, bottom)
@@ -403,10 +532,12 @@ fun mapPointToPreview(
     containerW: Float,
     containerH: Float,
     sourceW: Int,
-    sourceH: Int
+    sourceH: Int,
+    isFrontCamera: Boolean = false
 ): Offset {
+    val rawX = if (isFrontCamera) (1f - normX) else normX
     if (sourceW <= 0 || sourceH <= 0) {
-        return Offset(normX * containerW, normY * containerH)
+        return Offset(rawX * containerW, normY * containerH)
     }
 
     val scale = maxOf(containerW / sourceW.toFloat(), containerH / sourceH.toFloat())
@@ -415,5 +546,5 @@ fun mapPointToPreview(
     val offsetX = (containerW - scaledW) / 2f
     val offsetY = (containerH - scaledH) / 2f
 
-    return Offset(offsetX + normX * scaledW, offsetY + normY * scaledH)
+    return Offset(offsetX + rawX * scaledW, offsetY + normY * scaledH)
 }

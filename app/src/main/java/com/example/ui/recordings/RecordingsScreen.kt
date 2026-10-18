@@ -3,10 +3,12 @@ package com.example.ui.recordings
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.SurfaceTexture
+import android.media.MediaPlayer
 import android.net.Uri
-import android.widget.MediaController
+import android.view.Surface
+import android.view.TextureView
 import android.widget.Toast
-import android.widget.VideoView
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -36,6 +38,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FiberManualRecord
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
@@ -53,8 +56,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -460,28 +465,46 @@ private fun VideoPlaybackDialog(
     val context = LocalContext.current
     var telemetryList by remember { mutableStateOf<List<FrameTelemetry>>(emptyList()) }
     var currentTelemetry by remember { mutableStateOf<FrameTelemetry?>(null) }
-    var showOverlay by remember { mutableStateOf(true) }
+    var showOverlay by remember { mutableStateOf(false) }
     var playbackError by remember { mutableStateOf<String?>(null) }
-    var videoViewRef by remember { mutableStateOf<VideoView?>(null) }
+    var mediaPlayerRef by remember { mutableStateOf<MediaPlayer?>(null) }
+    var isPlaying by remember { mutableStateOf(false) }
+    var currentPosMs by remember { mutableLongStateOf(0L) }
+    var durationMs by remember { mutableLongStateOf(1L) }
     val textMeasurer = rememberTextMeasurer()
 
     LaunchedEffect(video.filePath) {
         telemetryList = videoRepository.loadVideoTelemetry(video.filePath)
     }
 
-    LaunchedEffect(videoViewRef, telemetryList) {
-        val vv = videoViewRef ?: return@LaunchedEffect
+    LaunchedEffect(mediaPlayerRef, telemetryList) {
+        val player = mediaPlayerRef ?: return@LaunchedEffect
         while (isActive) {
             try {
-                if (vv.isPlaying && telemetryList.isNotEmpty()) {
-                    val pos = vv.currentPosition.toLong()
-                    currentTelemetry = telemetryList.minByOrNull { kotlin.math.abs(it.timeMs - pos) }
-                        ?.takeIf { kotlin.math.abs(it.timeMs - pos) < 800 }
+                if (player.isPlaying) {
+                    val pos = player.currentPosition.toLong()
+                    currentPosMs = pos
+                    if (telemetryList.isNotEmpty()) {
+                        currentTelemetry = telemetryList.minByOrNull { kotlin.math.abs(it.timeMs - pos) }
+                            ?.takeIf { kotlin.math.abs(it.timeMs - pos) < 800 }
+                    }
                 }
             } catch (e: Exception) {
                 // Ignore transient player state exceptions
             }
             delay(50)
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            try {
+                mediaPlayerRef?.stop()
+                mediaPlayerRef?.release()
+                mediaPlayerRef = null
+            } catch (e: Exception) {
+                // Safe cleanup
+            }
         }
     }
 
@@ -517,9 +540,9 @@ private fun VideoPlaybackDialog(
                         )
                         Text(
                             text = if (telemetryList.isNotEmpty()) {
-                                "Synchronized Prominent Object Tracking HUD (${telemetryList.size} frames)"
+                                "Burned-in Object Detections & Tracking HUD (${telemetryList.size} logged events)"
                             } else {
-                                "Live camera recording playback"
+                                "Burned-in Object Detections & Tracking HUD"
                             },
                             color = TargetAmber,
                             fontSize = 11.sp
@@ -562,7 +585,7 @@ private fun VideoPlaybackDialog(
                     }
                 }
 
-                // Video Player with Tracking Overlay
+                // Video Player with Tracking Overlay via TextureView + MediaPlayer
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -573,20 +596,47 @@ private fun VideoPlaybackDialog(
                 ) {
                     AndroidView(
                         factory = { ctx ->
-                            VideoView(ctx).apply {
-                                setVideoPath(video.filePath)
-                                val mediaController = MediaController(ctx)
-                                mediaController.setAnchorView(this)
-                                setMediaController(mediaController)
-                                setOnErrorListener { _, what, extra ->
-                                    playbackError = "Playback issue (code $what:$extra). Please record a fresh video."
-                                    true
+                            TextureView(ctx).apply {
+                                surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                                    override fun onSurfaceTextureAvailable(surfaceTexture: SurfaceTexture, width: Int, height: Int) {
+                                        try {
+                                            val surface = Surface(surfaceTexture)
+                                            val mp = MediaPlayer().apply {
+                                                setSurface(surface)
+                                                setDataSource(video.filePath)
+                                                isLooping = true
+                                                setOnPreparedListener { player ->
+                                                    durationMs = player.duration.toLong().coerceAtLeast(1L)
+                                                    player.start()
+                                                    isPlaying = true
+                                                }
+                                                setOnErrorListener { _, what, extra ->
+                                                    playbackError = "Playback issue (code $what:$extra). Please record a fresh video."
+                                                    true
+                                                }
+                                                prepareAsync()
+                                            }
+                                            mediaPlayerRef = mp
+                                        } catch (e: Exception) {
+                                            playbackError = "Cannot play video: ${e.message}"
+                                        }
+                                    }
+
+                                    override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {}
+
+                                    override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
+                                        try {
+                                            mediaPlayerRef?.stop()
+                                            mediaPlayerRef?.release()
+                                            mediaPlayerRef = null
+                                        } catch (e: Exception) {
+                                            // Ignore
+                                        }
+                                        return true
+                                    }
+
+                                    override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {}
                                 }
-                                setOnPreparedListener { mp ->
-                                    mp.isLooping = true
-                                    start()
-                                }
-                                videoViewRef = this
                             }
                         },
                         modifier = Modifier.fillMaxSize()
@@ -695,7 +745,64 @@ private fun VideoPlaybackDialog(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(16.dp))
+                // Playback Control Bar
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 10.dp, bottom = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        IconButton(
+                            onClick = {
+                                mediaPlayerRef?.let { mp ->
+                                    if (mp.isPlaying) {
+                                        mp.pause()
+                                        isPlaying = false
+                                    } else {
+                                        mp.start()
+                                        isPlaying = true
+                                    }
+                                }
+                            },
+                            modifier = Modifier
+                                .size(40.dp)
+                                .background(SurfaceDark, CircleShape)
+                        ) {
+                            Icon(
+                                imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                contentDescription = if (isPlaying) "Pause" else "Play",
+                                tint = CyberCyan,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+
+                        val curSec = currentPosMs / 1000
+                        val durSec = durationMs / 1000
+                        Text(
+                            text = String.format("%02d:%02d / %02d:%02d", curSec / 60, curSec % 60, durSec / 60, durSec % 60),
+                            color = Color.LightGray,
+                            fontSize = 12.sp,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+
+                    if (telemetryList.isNotEmpty() && currentTelemetry != null) {
+                        Text(
+                            text = "TRACK: ${currentTelemetry?.label}",
+                            color = TargetAmber,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
 
                 // Share Button inside Player
                 Button(

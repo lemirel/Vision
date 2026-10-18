@@ -10,8 +10,11 @@ import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import java.util.concurrent.atomic.AtomicReference
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
@@ -166,6 +169,11 @@ fun CameraPreviewScreen(
     var frameCounter by remember { mutableIntStateOf(0) }
     var lastFpsTimestamp by remember { mutableLongStateOf(SystemClock.uptimeMillis()) }
 
+    var detectorStatus by remember { mutableStateOf<com.example.ml.DetectorStatus>(com.example.ml.DetectorStatus.Initializing) }
+
+    val latestTrackedRef = remember { AtomicReference<List<DetectedObject>>(emptyList()) }
+    val latestProminentRef = remember { AtomicReference<DetectedObject?>(null) }
+
     val mediaPipeHelper = remember {
         MediaPipeObjectDetectorHelper(
             context = context,
@@ -183,12 +191,19 @@ fun CameraPreviewScreen(
                 }
 
                 val tracked = objectTracker.processFrame(detections, timestampMs)
+                latestTrackedRef.set(tracked)
+                val prom = tracked.firstOrNull { it.isProminent }
+                latestProminentRef.set(prom)
+
                 detectedObjects = tracked
-                prominentObject = tracked.firstOrNull { it.isProminent }
+                prominentObject = prom
                 lockedTargetId = objectTracker.lockedTargetId
             },
             onError = { error ->
                 Log.e("CameraPreviewScreen", "Detector Error: $error")
+            },
+            onStatusChanged = { status ->
+                detectorStatus = status
             }
         )
     }
@@ -212,7 +227,7 @@ fun CameraPreviewScreen(
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
     val previewView = remember {
         PreviewView(context).apply {
-            implementationMode = PreviewView.ImplementationMode.PERFORMANCE
+            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
             scaleType = PreviewView.ScaleType.FILL_CENTER
         }
     }
@@ -251,7 +266,7 @@ fun CameraPreviewScreen(
             .background(Color.Black)
             .testTag("camera_preview_screen")
     ) {
-        // 1. Live Camera Preview View with high-performance SurfaceView mode
+        // 1. Live Camera Preview View with TextureView COMPATIBLE mode
         AndroidView(
             factory = { previewView },
             modifier = Modifier.fillMaxSize()
@@ -267,7 +282,17 @@ fun CameraPreviewScreen(
                 it.setSurfaceProvider(previewView.surfaceProvider)
             }
 
+            val resolutionSelector = ResolutionSelector.Builder()
+                .setResolutionStrategy(
+                    ResolutionStrategy(
+                        android.util.Size(720, 1280),
+                        ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                    )
+                )
+                .build()
+
             val imageAnalysis = ImageAnalysis.Builder()
+                .setResolutionSelector(resolutionSelector)
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build()
 
@@ -277,13 +302,17 @@ fun CameraPreviewScreen(
                         return@setAnalyzer
                     }
                     val rotationDegrees = imageProxy.imageInfo.rotationDegrees
-                    val bitmap = imageProxy.toBitmap()
+                    val rawBitmap = imageProxy.toBitmap()
 
                     val rotatedBitmap = if (rotationDegrees != 0) {
                         val matrix = Matrix().apply { postRotate(rotationDegrees.toFloat()) }
-                        Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+                        val rotated = Bitmap.createBitmap(rawBitmap, 0, 0, rawBitmap.width, rawBitmap.height, matrix, true)
+                        if (rotated != rawBitmap) {
+                            rawBitmap.recycle()
+                        }
+                        rotated
                     } else {
-                        bitmap
+                        rawBitmap
                     }
 
                     sourceWidth = rotatedBitmap.width
@@ -293,7 +322,9 @@ fun CameraPreviewScreen(
                     mediaPipeHelper.detectLiveStream(rotatedBitmap, timestamp)
 
                     if (videoRecorder.isCurrentlyRecording()) {
-                        videoRecorder.submitFrameTelemetry(prominentObject)
+                        val currentDetections = latestTrackedRef.get() ?: emptyList()
+                        val currentProminent = latestProminentRef.get()
+                        videoRecorder.recordFrame(rotatedBitmap, currentDetections, currentProminent)
                     }
                 } catch (e: Exception) {
                     Log.e("CameraPreviewScreen", "Analyzer error", e)
@@ -308,27 +339,40 @@ fun CameraPreviewScreen(
 
             try {
                 cameraProvider.unbindAll()
-                val videoCapture = videoRecorder.createVideoCapture()
-                cameraInstance = cameraProvider.bindToLifecycle(
-                    lifecycleOwner,
-                    cameraSelector,
-                    preview,
-                    imageAnalysis,
-                    videoCapture
-                )
-            } catch (e: Exception) {
-                Log.e("CameraPreviewScreen", "Use case binding with VideoCapture failed, falling back: ${e.message}", e)
-                try {
-                    cameraProvider.unbindAll()
-                    cameraInstance = cameraProvider.bindToLifecycle(
+
+                // Query camera info before binding to determine hardware capabilities
+                val cameraInfo = cameraProvider.getCameraInfo(cameraSelector)
+                val videoCapture = videoRecorder.createVideoCapture(cameraInfo)
+
+                cameraInstance = if (videoCapture != null) {
+                    try {
+                        cameraProvider.bindToLifecycle(
+                            lifecycleOwner,
+                            cameraSelector,
+                            preview,
+                            imageAnalysis,
+                            videoCapture
+                        )
+                    } catch (vcEx: Exception) {
+                        Log.w("CameraPreviewScreen", "Binding with VideoCapture failed: ${vcEx.message}. Binding Preview + ImageAnalysis.", vcEx)
+                        cameraProvider.unbindAll()
+                        cameraProvider.bindToLifecycle(
+                            lifecycleOwner,
+                            cameraSelector,
+                            preview,
+                            imageAnalysis
+                        )
+                    }
+                } else {
+                    cameraProvider.bindToLifecycle(
                         lifecycleOwner,
                         cameraSelector,
                         preview,
                         imageAnalysis
                     )
-                } catch (fallbackEx: Exception) {
-                    Log.e("CameraPreviewScreen", "Fallback binding failed: ${fallbackEx.message}", fallbackEx)
                 }
+            } catch (e: Exception) {
+                Log.e("CameraPreviewScreen", "Camera binding failed: ${e.message}", e)
             }
         }
 
@@ -338,6 +382,7 @@ fun CameraPreviewScreen(
             prominentObject = prominentObject,
             sourceImageWidth = sourceWidth,
             sourceImageHeight = sourceHeight,
+            isFrontCamera = (lensFacing == CameraSelector.LENS_FACING_FRONT),
             overlayStyle = overlayStyle,
             showConfidence = showConfidence,
             showTrackingId = showTrackingId,
@@ -379,15 +424,25 @@ fun CameraPreviewScreen(
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        val statusDotColor = when (detectorStatus) {
+                            is com.example.ml.DetectorStatus.Initializing -> TargetAmber
+                            is com.example.ml.DetectorStatus.Error -> RecCrimson
+                            is com.example.ml.DetectorStatus.Ready -> CyberCyan
+                        }
+                        val statusText = when (detectorStatus) {
+                            is com.example.ml.DetectorStatus.Initializing -> "INITIALIZING AI..."
+                            is com.example.ml.DetectorStatus.Error -> "DETECTOR ERROR"
+                            is com.example.ml.DetectorStatus.Ready -> "${fps} FPS • ${inferenceLatencyMs}ms"
+                        }
                         Box(
                             modifier = Modifier
                                 .size(8.dp)
                                 .clip(CircleShape)
-                                .background(CyberCyan)
+                                .background(statusDotColor)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "${fps} FPS • ${inferenceLatencyMs}ms",
+                            text = statusText,
                             color = Color.White,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
@@ -619,6 +674,10 @@ fun CameraPreviewScreen(
                 Button(
                     onClick = {
                         if (!isRecording) {
+                            if (!videoRecorder.isVideoSupported) {
+                                Toast.makeText(context, "Video recording is unavailable on this camera hardware/emulator.", Toast.LENGTH_SHORT).show()
+                                return@Button
+                            }
                             videoRecorder.startRecording(
                                 onStarted = {
                                     isRecording = true

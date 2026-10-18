@@ -534,16 +534,32 @@ fun GalleryAnalysisScreen(
     }
 }
 
-// Helper: load Bitmap from Uri
+// Helper: load Bitmap from Uri with safe downsampling to prevent OutOfMemory crashes
 private suspend fun loadBitmapFromUri(context: Context, uri: Uri): Bitmap? = withContext(Dispatchers.IO) {
     try {
+        val boundsOptions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         context.contentResolver.openInputStream(uri)?.use { stream ->
-            val options = BitmapFactory.Options().apply {
-                inPreferredConfig = Bitmap.Config.ARGB_8888
-            }
-            BitmapFactory.decodeStream(stream, null, options)
+            BitmapFactory.decodeStream(stream, null, boundsOptions)
+        }
+        val origW = boundsOptions.outWidth
+        val origH = boundsOptions.outHeight
+        if (origW <= 0 || origH <= 0) return@withContext null
+
+        val maxDim = 1600
+        var sampleSize = 1
+        while (origW / (sampleSize * 2) >= maxDim || origH / (sampleSize * 2) >= maxDim) {
+            sampleSize *= 2
+        }
+
+        val decodeOptions = BitmapFactory.Options().apply {
+            inSampleSize = sampleSize
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+        }
+        context.contentResolver.openInputStream(uri)?.use { stream ->
+            BitmapFactory.decodeStream(stream, null, decodeOptions)
         }
     } catch (e: Exception) {
+        android.util.Log.e("GalleryAnalysis", "Error loading bitmap: ${e.message}", e)
         null
     }
 }
@@ -655,23 +671,40 @@ private suspend fun exportAndShareAnnotatedImage(
             annotated.compress(Bitmap.CompressFormat.JPEG, 92, out)
         }
 
-        // Add to MediaStore
-        val values = ContentValues().apply {
-            put(MediaStore.Images.Media.TITLE, file.nameWithoutExtension)
-            put(MediaStore.Images.Media.DISPLAY_NAME, file.name)
-            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-            put(MediaStore.Images.Media.DATA, file.absolutePath)
+        // Save to Android MediaStore Pictures album safely without mutating deprecated _data
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val values = ContentValues().apply {
+                    put(MediaStore.Images.Media.DISPLAY_NAME, file.name)
+                    put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                    put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/VisionTrack")
+                    put(MediaStore.Images.Media.IS_PENDING, 1)
+                }
+                val uri = context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                if (uri != null) {
+                    context.contentResolver.openOutputStream(uri)?.use { out ->
+                        file.inputStream().use { input -> input.copyTo(out) }
+                    }
+                    values.clear()
+                    values.put(MediaStore.Images.Media.IS_PENDING, 0)
+                    context.contentResolver.update(uri, values, null, null)
+                }
+            }
+        } catch (mediaStoreEx: Exception) {
+            android.util.Log.w("GalleryAnalysis", "MediaStore export notice: ${mediaStoreEx.message}")
         }
-        context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
 
-        // Share Intent
-        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+        // Share via FileProvider (compliant with modern Android permissions)
+        val shareUri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
         val shareIntent = Intent(Intent.ACTION_SEND).apply {
             type = "image/jpeg"
-            putExtra(Intent.EXTRA_STREAM, uri)
+            putExtra(Intent.EXTRA_STREAM, shareUri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-        context.startActivity(Intent.createChooser(shareIntent, "Share Annotated Detection Image"))
+        val chooser = Intent.createChooser(shareIntent, "Share Annotated Detection Image").apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        context.startActivity(chooser)
     } catch (e: Exception) {
         withContext(Dispatchers.Main) {
             Toast.makeText(context, "Export error: ${e.message}", Toast.LENGTH_SHORT).show()
