@@ -91,6 +91,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.FileProvider
+import com.example.BuildConfig
 import com.example.data.VideoRepository
 import com.example.data.model.FrameTelemetry
 import com.example.data.model.RecordedVideo
@@ -103,6 +104,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.File
+import java.io.FileInputStream
 
 @Composable
 fun RecordingsScreen(
@@ -689,28 +691,41 @@ private fun VideoPlaybackDialog(
                                 surfaceTextureListener = object : TextureView.SurfaceTextureListener {
                                     override fun onSurfaceTextureAvailable(surfaceTexture: SurfaceTexture, width: Int, height: Int) {
                                         try {
+                                            val videoFile = File(video.filePath)
+                                            if (!videoFile.exists() || videoFile.length() < 1024L) {
+                                                playbackError = "Video file is missing or unreadable (${videoFile.length()} bytes)"
+                                                return
+                                            }
+
                                             val surface = Surface(surfaceTexture)
                                             surfaceHolder = surface
-                                            val mp = MediaPlayer().apply {
-                                                setSurface(surface)
-                                                setDataSource(video.filePath)
-                                                isLooping = true
-                                                setOnVideoSizeChangedListener { _, w, h ->
-                                                    if (w > 0 && h > 0) {
-                                                        videoAspectRatio = w.toFloat() / h.toFloat()
-                                                    }
-                                                }
-                                                setOnPreparedListener { player ->
-                                                    durationMs = player.duration.toLong().coerceAtLeast(1L)
-                                                    player.start()
-                                                    isPlaying = true
-                                                }
-                                                setOnErrorListener { _, what, extra ->
-                                                    playbackError = "Playback error ($what:$extra). This video may be in an unsupported codec format."
-                                                    true
-                                                }
-                                                prepareAsync()
+                                            val mp = MediaPlayer()
+
+                                            // setDataSource MUST be called in Idle state before setSurface
+                                            val fis = FileInputStream(videoFile)
+                                            try {
+                                                mp.setDataSource(fis.fd)
+                                            } finally {
+                                                try { fis.close() } catch (ignored: Throwable) {}
                                             }
+
+                                            mp.setSurface(surface)
+                                            mp.isLooping = true
+                                            mp.setOnVideoSizeChangedListener { _, w, h ->
+                                                if (w > 0 && h > 0) {
+                                                    videoAspectRatio = w.toFloat() / h.toFloat()
+                                                }
+                                            }
+                                            mp.setOnPreparedListener { player ->
+                                                durationMs = player.duration.toLong().coerceAtLeast(1L)
+                                                player.start()
+                                                isPlaying = true
+                                            }
+                                            mp.setOnErrorListener { _, what, extra ->
+                                                playbackError = "Playback error ($what:$extra). Unsupported codec format or file not finalized."
+                                                true
+                                            }
+                                            mp.prepareAsync()
                                             mediaPlayerRef = mp
                                         } catch (e: Exception) {
                                             playbackError = "Cannot play video: ${e.message}"
@@ -887,7 +902,7 @@ private fun shareVideo(context: Context, video: RecordedVideo) {
     try {
         val uri = FileProvider.getUriForFile(
             context,
-            "${context.packageName}.fileprovider",
+            "${BuildConfig.APPLICATION_ID}.fileprovider",
             file
         )
         val intent = Intent(Intent.ACTION_SEND).apply {

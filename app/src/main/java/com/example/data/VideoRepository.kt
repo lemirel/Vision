@@ -28,12 +28,20 @@ class VideoRepository(private val context: Context) {
                 if (file.length() < 1024L) return@mapNotNull null
                 var duration = 0L
                 val retriever = MediaMetadataRetriever()
+                var hasVideoTrack = false
                 try {
                     retriever.setDataSource(file.absolutePath)
+                    val hasVideo = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO)
+                    hasVideoTrack = (hasVideo != null && hasVideo != "no")
+                    if (!hasVideoTrack) {
+                        try { file.delete() } catch (ignored: Throwable) {}
+                        return@mapNotNull null
+                    }
                     val durStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
                     duration = durStr?.toLongOrNull() ?: 0L
                 } catch (e: Exception) {
                     Log.w(TAG, "Error retrieving metadata for ${file.name}: ${e.message}")
+                    return@mapNotNull null
                 } finally {
                     try { retriever.release() } catch (ignored: Exception) {}
                 }
@@ -58,8 +66,10 @@ class VideoRepository(private val context: Context) {
         val retriever = MediaMetadataRetriever()
         try {
             retriever.setDataSource(filePath)
+            val hasVideo = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO)
+            if (hasVideo == null || hasVideo == "no") return@withContext null
+
             retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                ?: retriever.getFrameAtTime(500_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
                 ?: retriever.frameAtTime
         } catch (e: Exception) {
             Log.w(TAG, "Could not extract thumbnail: ${e.message}")

@@ -99,7 +99,7 @@ dependencies {
   implementation(libs.androidx.compose.ui.tooling.preview)
   implementation(libs.androidx.core.ktx)
   implementation(libs.coil.compose)
-  implementation("com.google.mediapipe:tasks-vision:0.10.14")
+  implementation(libs.mediapipe.tasks.vision)
   // Uncomment to use Firestore:
   // implementation(libs.firebase.firestore)
 

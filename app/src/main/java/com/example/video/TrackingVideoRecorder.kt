@@ -1,18 +1,24 @@
 package com.example.video
 
+import android.Manifest
 import android.content.ContentValues
 import android.content.Context
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color as AndroidColor
 import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.Typeface
+import android.media.AudioFormat
+import android.media.AudioRecord
 import android.media.Image
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.media.MediaMuxer
+import android.media.MediaRecorder
+import androidx.core.content.ContextCompat
 import java.util.Arrays
 import android.os.Build
 import android.os.Environment
@@ -44,9 +50,9 @@ import kotlin.math.min
  * directly into the saved MP4 video frames using MediaCodec and MediaMuxer.
  *
  * Ensures:
+ * - Standard video/avc (H.264 Baseline) and audio/mp4a-latm (AAC) streams.
+ * - Reliable file finalization, closing, and flushing of the moov atom header.
  * - Detections remain permanently visible in saved videos across all players and shared apps.
- * - Hardware and software H.264 video encoding without Camera2 hardware profile limitations.
- * - Zero frame drops or main-thread blocks via dedicated background frame queue.
  * - Android 10+ Scoped Storage compliance (no deprecated _data mutation).
  */
 class TrackingVideoRecorder(
@@ -54,10 +60,15 @@ class TrackingVideoRecorder(
 ) {
     companion object {
         private const val TAG = "TrackingVideoRecorder"
-        private const val MIME_TYPE = MediaFormat.MIMETYPE_VIDEO_AVC
+        private const val MIME_TYPE_VIDEO = MediaFormat.MIMETYPE_VIDEO_AVC // "video/avc"
+        private const val MIME_TYPE_AUDIO = MediaFormat.MIMETYPE_AUDIO_AAC // "audio/mp4a-latm"
+        private const val MIME_TYPE = MIME_TYPE_VIDEO // Backward-compat alias
         private const val FRAME_RATE = 30
-        private const val BIT_RATE = 2_500_000 // 2.5 Mbps for crisp annotations
+        private const val BIT_RATE = 2_500_000 // 2.5 Mbps
         private const val I_FRAME_INTERVAL = 1
+        private const val AUDIO_SAMPLE_RATE = 44100
+        private const val AUDIO_CHANNEL_COUNT = 1
+        private const val AUDIO_BIT_RATE = 64_000
     }
 
     private val isRecording = AtomicBoolean(false)
@@ -347,88 +358,211 @@ class TrackingVideoRecorder(
 
     /**
      * Dedicated background encoding loop that reads annotated frames from queue,
-     * encodes them to H.264 via MediaCodec, and muxes into an MP4 file.
+     * encodes video to H.264 (video/avc) and audio to AAC (audio/mp4a-latm) via MediaCodec,
+     * and muxes into an MP4 file with strict container finalization.
      */
     private fun runEncodingPipeline(outputFile: File, onError: (String) -> Unit) {
-        var codec: MediaCodec? = null
+        var videoCodec: MediaCodec? = null
+        var audioCodec: MediaCodec? = null
+        var audioRecord: AudioRecord? = null
         var muxer: MediaMuxer? = null
         var muxerStarted = false
         var videoTrackIndex = -1
+        var audioTrackIndex = -1
+        var videoFormatReady: MediaFormat? = null
+        var audioFormatReady: MediaFormat? = null
+        var videoSamplesWritten = 0
+        var audioSamplesWritten = 0
+        var lastVideoPts = 0L
+        var lastAudioPts = 0L
+        var frameCount = 0L
+        var audioSamplesCount = 0L
+        var hasAudio = false
+        var width = 0
+        var height = 0
+        var isSemiPlanar = false
 
-        try {
-            // Wait for first frame to determine exact resolution
-            var firstFrame: Bitmap? = null
-            val waitTimeoutMs = SystemClock.uptimeMillis() + 4000
-            while (isRecording.get() && firstFrame == null && SystemClock.uptimeMillis() < waitTimeoutMs) {
-                firstFrame = frameQueue.poll(100, TimeUnit.MILLISECONDS)
-            }
-            if (firstFrame == null) {
-                Log.w(TAG, "No frames received during recording window")
-                return
-            }
+        val vBufferInfo = MediaCodec.BufferInfo()
+        val aBufferInfo = MediaCodec.BufferInfo()
 
-            val width = firstFrame.width
-            val height = firstFrame.height
+        // Local function placeholders to handle circular dependencies and scoping
+        var pumpAudioSample: () -> Unit = {}
+        var drainAudio: (Boolean) -> Unit = {}
+        var startMuxerIfReady: () -> Unit = {}
+        var drainVideo: (Boolean) -> Unit = {}
+        var processSingleFrame: (Bitmap) -> Unit = {}
 
-            // Discover supported color format (prefer SemiPlanar/NV12, fallback to Planar/I420)
-            codec = MediaCodec.createEncoderByType(MIME_TYPE)
-            val caps = codec.codecInfo.getCapabilitiesForType(MIME_TYPE)
-            val supportedFormats = caps.colorFormats
-            val colorFormat = when {
-                supportedFormats.contains(MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar) ->
-                    MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar
-                supportedFormats.contains(MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar) ->
-                    MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar
-                else -> MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar
-            }
-            val isSemiPlanar = (colorFormat == MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar)
-
-            val format = MediaFormat.createVideoFormat(MIME_TYPE, width, height).apply {
-                setInteger(MediaFormat.KEY_COLOR_FORMAT, colorFormat)
-                setInteger(MediaFormat.KEY_BIT_RATE, BIT_RATE)
-                setInteger(MediaFormat.KEY_FRAME_RATE, FRAME_RATE)
-                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, I_FRAME_INTERVAL)
-                setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
-
-                // Select H.264 Baseline profile for universal playback compatibility on Android / Pixel devices
-                try {
-                    val profileLevels = caps.profileLevels
-                    val hasBaseline = profileLevels.any { it.profile == MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline }
-                    if (hasBaseline) {
-                        setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
-                        setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel31)
+        pumpAudioSample = {
+            val aCodec = audioCodec
+            if (aCodec != null) {
+                val inIndex = try { aCodec.dequeueInputBuffer(10_000L) } catch (t: Throwable) { -1 }
+                if (inIndex >= 0) {
+                    val inBuffer = aCodec.getInputBuffer(inIndex)
+                    if (inBuffer != null) {
+                        inBuffer.clear()
+                        val pcmBytes = ByteArray(2048)
+                        var readBytes = 0
+                        val ar = audioRecord
+                        if (ar != null && ar.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                            val read = ar.read(pcmBytes, 0, pcmBytes.size)
+                            if (read > 0) readBytes = read
+                        }
+                        if (readBytes <= 0) {
+                            Arrays.fill(pcmBytes, 0.toByte())
+                            readBytes = pcmBytes.size
+                        }
+                        inBuffer.put(pcmBytes, 0, readBytes)
+                        val audioPts = (audioSamplesCount * 1_000_000L) / AUDIO_SAMPLE_RATE
+                        aCodec.queueInputBuffer(inIndex, 0, readBytes, audioPts, 0)
+                        audioSamplesCount += (readBytes / 2)
                     }
-                } catch (e: Exception) {
-                    Log.w(TAG, "Baseline profile configuration note: ${e.message}")
                 }
             }
+        }
 
-            codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            codec.start()
+        drainAudio = { endOfStream ->
+            val aCodec = audioCodec
+            val mx = muxer
+            if (aCodec != null && mx != null) {
+                var tryCount = 0
+                while (true) {
+                    val outIndex = try {
+                        aCodec.dequeueOutputBuffer(aBufferInfo, if (endOfStream) 10_000L else 0L)
+                    } catch (t: Throwable) {
+                        break
+                    }
 
-            muxer = MediaMuxer(outputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+                    if (outIndex == MediaCodec.INFO_TRY_AGAIN_LATER) {
+                        if (!endOfStream) break
+                        tryCount++
+                        if (tryCount >= 8) break
+                    } else if (outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                        audioFormatReady = aCodec.outputFormat
+                        startMuxerIfReady()
+                    } else if (outIndex >= 0) {
+                        tryCount = 0
+                        if (!muxerStarted && audioFormatReady == null) {
+                            audioFormatReady = aCodec.outputFormat
+                        }
+                        if (muxerStarted && audioTrackIndex >= 0) {
+                            val encoded = aCodec.getOutputBuffer(outIndex)
+                            if (encoded != null && (aBufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0 && aBufferInfo.size > 0) {
+                                encoded.position(aBufferInfo.offset)
+                                encoded.limit(aBufferInfo.offset + aBufferInfo.size)
+                                if (aBufferInfo.presentationTimeUs <= lastAudioPts) {
+                                    aBufferInfo.presentationTimeUs = lastAudioPts + 1000L
+                                }
+                                lastAudioPts = aBufferInfo.presentationTimeUs
+                                try {
+                                    mx.writeSampleData(audioTrackIndex, encoded, aBufferInfo)
+                                    audioSamplesWritten++
+                                } catch (e: Throwable) {
+                                    Log.w(TAG, "Audio sample write: ${e.message}")
+                                }
+                            }
+                        }
+                        try { aCodec.releaseOutputBuffer(outIndex, false) } catch (ignored: Throwable) {}
+                        if ((aBufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) break
+                    }
+                }
+            }
+        }
 
-            val bufferInfo = MediaCodec.BufferInfo()
-            var frameCount = 0L
+        startMuxerIfReady = {
+            val mx = muxer
+            if (!muxerStarted && mx != null) {
+                val vFmt = videoFormatReady
+                // Start if video is ready AND (audio is ready OR we are finishing OR we've waited too long)
+                val shouldStartNow = vFmt != null && (!hasAudio || audioFormatReady != null || !isRecording.get() || frameCount > 15)
+                
+                if (shouldStartNow && vFmt != null) {
+                    try {
+                        videoTrackIndex = mx.addTrack(vFmt)
+                        if (hasAudio && audioFormatReady != null) {
+                            audioTrackIndex = mx.addTrack(audioFormatReady!!)
+                        } else if (hasAudio) {
+                            Log.w(TAG, "Audio format not ready, starting video-only fallback")
+                            hasAudio = false // Disable audio for this session
+                        }
+                        mx.start()
+                        muxerStarted = true
+                        Log.d(TAG, "MediaMuxer started. VideoIdx=$videoTrackIndex, AudioIdx=$audioTrackIndex")
 
-            fun processSingleFrame(frame: Bitmap) {
+                        if (audioTrackIndex >= 0) {
+                            for (i in 0 until 5) {
+                                pumpAudioSample()
+                                drainAudio(false)
+                            }
+                        }
+                    } catch (e: Throwable) {
+                        Log.e(TAG, "Failed to start MediaMuxer: ${e.message}")
+                    }
+                }
+            }
+        }
+
+        drainVideo = { endOfStream ->
+            val codec = videoCodec
+            val mx = muxer
+            if (codec != null && mx != null) {
+                var tryCount = 0
+                while (true) {
+                    val outIndex = try {
+                        codec.dequeueOutputBuffer(vBufferInfo, if (endOfStream) 10_000L else 0L)
+                    } catch (t: Throwable) {
+                        break
+                    }
+
+                    if (outIndex == MediaCodec.INFO_TRY_AGAIN_LATER) {
+                        if (!endOfStream) break
+                        tryCount++
+                        if (tryCount >= 10) break
+                    } else if (outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                        videoFormatReady = codec.outputFormat
+                        startMuxerIfReady()
+                    } else if (outIndex >= 0) {
+                        tryCount = 0
+                        if (!muxerStarted) {
+                            if (videoFormatReady == null) {
+                                videoFormatReady = codec.outputFormat
+                            }
+                            startMuxerIfReady()
+                        }
+                        if (muxerStarted && videoTrackIndex >= 0) {
+                            val encoded = codec.getOutputBuffer(outIndex)
+                            if (encoded != null && (vBufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0 && vBufferInfo.size > 0) {
+                                encoded.position(vBufferInfo.offset)
+                                encoded.limit(vBufferInfo.offset + vBufferInfo.size)
+                                if (vBufferInfo.presentationTimeUs <= lastVideoPts) {
+                                    vBufferInfo.presentationTimeUs = lastVideoPts + 1000L
+                                }
+                                lastVideoPts = vBufferInfo.presentationTimeUs
+                                try {
+                                    mx.writeSampleData(videoTrackIndex, encoded, vBufferInfo)
+                                    videoSamplesWritten++
+                                } catch (e: Throwable) {
+                                    Log.w(TAG, "Video sample write: ${e.message}")
+                                }
+                            }
+                        }
+                        try { codec.releaseOutputBuffer(outIndex, false) } catch (ignored: Throwable) {}
+                        if ((vBufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) break
+                    }
+                }
+            }
+        }
+
+        processSingleFrame = { frame ->
+            val codec = videoCodec
+            if (codec != null) {
                 val inputIndex = try {
                     codec.dequeueInputBuffer(10_000L)
                 } catch (t: Throwable) {
-                    Log.w(TAG, "dequeueInputBuffer error: ${t.message}")
                     -1
                 }
 
                 if (inputIndex >= 0) {
                     try {
-                        if (frameCount == 0L) {
-                            try {
-                                val syncBundle = android.os.Bundle().apply {
-                                    putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
-                                }
-                                codec.setParameters(syncBundle)
-                            } catch (ignored: Throwable) {}
-                        }
                         val inputImage = try { codec.getInputImage(inputIndex) } catch (t: Throwable) { null }
                         val inputBuffer = try { codec.getInputBuffer(inputIndex) } catch (t: Throwable) { null }
                         val presentationTimeUs = (frameCount * 1_000_000L) / FRAME_RATE
@@ -460,11 +594,122 @@ class TrackingVideoRecorder(
                     frame.recycle()
                 }
 
-                // Drain output buffers
-                drainEncoder(codec, muxer, bufferInfo, false, videoTrackIndex, muxerStarted) { trackIdx, started ->
-                    videoTrackIndex = trackIdx
-                    muxerStarted = started
+                drainVideo(false)
+                if (hasAudio) {
+                    pumpAudioSample()
+                    drainAudio(false)
                 }
+            }
+        }
+
+        try {
+            // Wait for first frame to determine exact resolution
+            var firstFrame: Bitmap? = null
+            val waitTimeoutMs = SystemClock.uptimeMillis() + 4000
+            while (isRecording.get() && firstFrame == null && SystemClock.uptimeMillis() < waitTimeoutMs) {
+                firstFrame = frameQueue.poll(100, TimeUnit.MILLISECONDS)
+            }
+            if (firstFrame == null) {
+                Log.w(TAG, "No frames received during recording window")
+                return
+            }
+
+            width = firstFrame.width
+            height = firstFrame.height
+
+            // 1. Initialize Video Encoder (video/avc)
+            videoCodec = MediaCodec.createEncoderByType(MIME_TYPE_VIDEO)
+            val caps = videoCodec.codecInfo.getCapabilitiesForType(MIME_TYPE_VIDEO)
+            val supportedFormats = caps.colorFormats
+            val colorFormat = when {
+                supportedFormats.contains(MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar) ->
+                    MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar
+                supportedFormats.contains(MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar) ->
+                    MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar
+                else -> MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar
+            }
+            isSemiPlanar = (colorFormat == MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar)
+
+            val vFormat = MediaFormat.createVideoFormat(MIME_TYPE_VIDEO, width, height).apply {
+                setInteger(MediaFormat.KEY_COLOR_FORMAT, colorFormat)
+                setInteger(MediaFormat.KEY_BIT_RATE, BIT_RATE)
+                setInteger(MediaFormat.KEY_FRAME_RATE, FRAME_RATE)
+                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, I_FRAME_INTERVAL)
+
+                try {
+                    val encoderCaps = caps.encoderCapabilities
+                    if (encoderCaps?.isBitrateModeSupported(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR) == true) {
+                        setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
+                    } else if (encoderCaps?.isBitrateModeSupported(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR) == true) {
+                        setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
+                    }
+                } catch (ignored: Throwable) {}
+
+                try {
+                    val profileLevels = caps.profileLevels
+                    val hasBaseline = profileLevels.any { it.profile == MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline }
+                    if (hasBaseline) {
+                        setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
+                        setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel31)
+                    }
+                } catch (ignored: Throwable) {}
+            }
+
+            videoCodec.configure(vFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            videoCodec.start()
+
+            // 2. Initialize Audio Encoder (audio/mp4a-latm) and Audio Source
+            hasAudio = false
+            try {
+                val aFormat = MediaFormat.createAudioFormat(MIME_TYPE_AUDIO, AUDIO_SAMPLE_RATE, AUDIO_CHANNEL_COUNT).apply {
+                    setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
+                    setInteger(MediaFormat.KEY_BIT_RATE, AUDIO_BIT_RATE)
+                    setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
+                }
+                audioCodec = MediaCodec.createEncoderByType(MIME_TYPE_AUDIO)
+                audioCodec.configure(aFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                audioCodec.start()
+                hasAudio = true
+
+                val minBufSize = AudioRecord.getMinBufferSize(
+                    AUDIO_SAMPLE_RATE,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT
+                )
+                val recBufSize = maxOf(minBufSize, 4096)
+                if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                    try {
+                        val ar = AudioRecord(
+                            MediaRecorder.AudioSource.MIC,
+                            AUDIO_SAMPLE_RATE,
+                            AudioFormat.CHANNEL_IN_MONO,
+                            AudioFormat.ENCODING_PCM_16BIT,
+                            recBufSize
+                        )
+                        if (ar.state == AudioRecord.STATE_INITIALIZED) {
+                            ar.startRecording()
+                            audioRecord = ar
+                        } else {
+                            ar.release()
+                        }
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "AudioRecord start note: ${t.message}")
+                    }
+                }
+            } catch (e: Throwable) {
+                Log.w(TAG, "Audio encoding unavailable, continuing with video-only: ${e.message}")
+                hasAudio = false
+                audioCodec?.release()
+                audioCodec = null
+            }
+
+            // 3. Initialize MP4 Muxer
+            muxer = MediaMuxer(outputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+
+            // Prime audio encoder to generate audio format immediately
+            if (hasAudio) {
+                pumpAudioSample()
+                drainAudio(false)
             }
 
             // Process first frame
@@ -475,6 +720,9 @@ class TrackingVideoRecorder(
                 val nextFrame = frameQueue.poll(30, TimeUnit.MILLISECONDS)
                 if (nextFrame != null) {
                     processSingleFrame(nextFrame)
+                } else if (hasAudio) {
+                    pumpAudioSample()
+                    drainAudio(false)
                 }
             }
 
@@ -484,107 +732,92 @@ class TrackingVideoRecorder(
                 processSingleFrame(extraFrame)
             }
 
-            // Signal End-of-Stream to encoder with retries
-            var eosQueued = false
+            // Signal End-of-Stream to video encoder
+            var vEosQueued = false
             val eosDeadline = SystemClock.uptimeMillis() + 1500
-            while (!eosQueued && SystemClock.uptimeMillis() < eosDeadline) {
-                val eosInputIndex = try { codec.dequeueInputBuffer(10_000L) } catch (t: Throwable) { -1 }
+            while (!vEosQueued && SystemClock.uptimeMillis() < eosDeadline) {
+                val eosInputIndex = try { videoCodec.dequeueInputBuffer(10_000L) } catch (t: Throwable) { -1 }
                 if (eosInputIndex >= 0) {
-                    val presentationTimeUs = (frameCount * 1_000_000L) / FRAME_RATE
-                    codec.queueInputBuffer(eosInputIndex, 0, 0, presentationTimeUs, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                    eosQueued = true
+                    val pts = (frameCount * 1_000_000L) / FRAME_RATE
+                    videoCodec.queueInputBuffer(eosInputIndex, 0, 0, pts, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                    vEosQueued = true
                 } else {
-                    drainEncoder(codec, muxer, bufferInfo, false, videoTrackIndex, muxerStarted) { trackIdx, started ->
-                        videoTrackIndex = trackIdx
-                        muxerStarted = started
+                    drainVideo(false)
+                }
+            }
+
+            // Signal End-of-Stream to audio encoder
+            if (hasAudio && audioCodec != null) {
+                var aEosQueued = false
+                val aEosDeadline = SystemClock.uptimeMillis() + 1500
+                while (!aEosQueued && SystemClock.uptimeMillis() < aEosDeadline) {
+                    val aInIdx = try { audioCodec.dequeueInputBuffer(10_000L) } catch (t: Throwable) { -1 }
+                    if (aInIdx >= 0) {
+                        val aPts = (audioSamplesCount * 1_000_000L) / AUDIO_SAMPLE_RATE
+                        audioCodec.queueInputBuffer(aInIdx, 0, 0, aPts, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                        aEosQueued = true
+                    } else {
+                        drainAudio(false)
                     }
                 }
             }
 
             // Drain remaining output buffers until EOS flag received
-            drainEncoder(codec, muxer, bufferInfo, true, videoTrackIndex, muxerStarted) { trackIdx, started ->
-                videoTrackIndex = trackIdx
-                muxerStarted = started
+            drainVideo(true)
+            if (hasAudio) {
+                drainAudio(true)
             }
-
         } catch (e: Throwable) {
             Log.e(TAG, "Encoding pipeline error: ${e.message}", e)
             isRecording.set(false)
             mainHandler.post { onError(e.message ?: "Encoding error") }
         } finally {
             isRecording.set(false)
+            
+            // Final drain and dummy pump to satisfy MPEG4Writer
             try {
-                codec?.stop()
-                codec?.release()
-            } catch (e: Throwable) {
-                Log.w(TAG, "Error stopping codec: ${e.message}")
-            }
+                drainVideo(true)
+                if (hasAudio) drainAudio(true)
+            } catch (ignored: Throwable) {}
+
             try {
-                if (muxerStarted) {
-                    muxer?.stop()
+                val mx = muxer
+                if (mx != null) {
+                    if (muxerStarted) {
+                        // Ensure both tracks have at least one sample
+                        if (audioTrackIndex >= 0 && audioSamplesWritten == 0) {
+                            Log.w(TAG, "Forcing dummy audio in finally")
+                            for (i in 0 until 10) {
+                                pumpAudioSample()
+                                drainAudio(false)
+                            }
+                        }
+                        
+                        val canStop = (videoSamplesWritten > 0) && (audioTrackIndex < 0 || audioSamplesWritten > 0)
+                        if (canStop) {
+                            mx.stop()
+                            Log.d(TAG, "MediaMuxer stopped successfully.")
+                        } else {
+                            Log.w(TAG, "Muxer cannot stop: V=$videoSamplesWritten, A=$audioSamplesWritten")
+                        }
+                    }
                 }
-                muxer?.release()
             } catch (e: Throwable) {
-                Log.w(TAG, "Error stopping muxer: ${e.message}")
+                Log.w(TAG, "Error stopping muxer in finally: ${e.message}")
             }
+
+            try { muxer?.release() } catch (ignored: Throwable) {}
+            try { videoCodec?.stop() } catch (ignored: Throwable) {}
+            try { videoCodec?.release() } catch (ignored: Throwable) {}
+            try { audioCodec?.stop() } catch (ignored: Throwable) {}
+            try { audioCodec?.release() } catch (ignored: Throwable) {}
+            try { audioRecord?.stop() } catch (ignored: Throwable) {}
+            try { audioRecord?.release() } catch (ignored: Throwable) {}
+
             // Clear and recycle any residual queue bitmaps
             while (true) {
                 val residual = frameQueue.poll() ?: break
                 try { residual.recycle() } catch (ignored: Throwable) {}
-            }
-        }
-    }
-
-    private fun drainEncoder(
-        codec: MediaCodec,
-        muxer: MediaMuxer,
-        bufferInfo: MediaCodec.BufferInfo,
-        endOfStream: Boolean,
-        currentTrackIndex: Int,
-        isMuxerStarted: Boolean,
-        onStateUpdate: (Int, Boolean) -> Unit
-    ) {
-        var trackIdx = currentTrackIndex
-        var started = isMuxerStarted
-
-        while (true) {
-            val outIndex = try {
-                codec.dequeueOutputBuffer(bufferInfo, if (endOfStream) 15_000L else 0L)
-            } catch (t: Throwable) {
-                Log.w(TAG, "dequeueOutputBuffer exception: ${t.message}")
-                break
-            }
-
-            if (outIndex == MediaCodec.INFO_TRY_AGAIN_LATER) {
-                if (!endOfStream) break
-            } else if (outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                if (!started) {
-                    trackIdx = muxer.addTrack(codec.outputFormat)
-                    muxer.start()
-                    started = true
-                    onStateUpdate(trackIdx, true)
-                }
-            } else if (outIndex >= 0) {
-                if (started && trackIdx >= 0) {
-                    val encodedData: ByteBuffer? = codec.getOutputBuffer(outIndex)
-                    if (encodedData != null && (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0 && bufferInfo.size != 0) {
-                        encodedData.position(bufferInfo.offset)
-                        encodedData.limit(bufferInfo.offset + bufferInfo.size)
-                        try {
-                            muxer.writeSampleData(trackIdx, encodedData, bufferInfo)
-                        } catch (e: Throwable) {
-                            Log.w(TAG, "Sample write error: ${e.message}")
-                        }
-                    }
-                }
-                try {
-                    codec.releaseOutputBuffer(outIndex, false)
-                } catch (t: Throwable) {
-                    // Ignore release errors on EOS
-                }
-                if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
-                    break
-                }
             }
         }
     }

@@ -12,9 +12,11 @@ import com.google.mediapipe.tasks.core.Delegate
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.objectdetector.ObjectDetector
 import com.google.mediapipe.tasks.vision.objectdetector.ObjectDetectorResult
-import java.io.File
-import java.io.FileOutputStream
 
+/**
+ * Helper class to initialize and manage MediaPipe Object Detector task.
+ * Supports both real-time LIVE_STREAM and single IMAGE detection modes.
+ */
 class MediaPipeObjectDetectorHelper(
     private val context: Context,
     var threshold: Float = 0.40f,
@@ -38,6 +40,10 @@ class MediaPipeObjectDetectorHelper(
         setupLiveStreamDetector()
     }
 
+    /**
+     * Initializes the Object Detector in LIVE_STREAM mode.
+     * Results are returned asynchronously via onLiveDetectionResult callback.
+     */
     fun setupLiveStreamDetector() {
         synchronized(detectorLock) {
             onStatusChanged?.invoke(DetectorStatus.Initializing)
@@ -52,7 +58,7 @@ class MediaPipeObjectDetectorHelper(
                     baseOptionsBuilder.setDelegate(Delegate.CPU)
                 }
 
-                ensureModelFileExists()
+                // Use setModelAssetPath to load from assets directly
                 baseOptionsBuilder.setModelAssetPath(MODEL_FILE_NAME)
 
                 val options = ObjectDetector.ObjectDetectorOptions.builder()
@@ -64,6 +70,8 @@ class MediaPipeObjectDetectorHelper(
                         val now = SystemClock.uptimeMillis()
                         val timestampMs = result.timestampMs()
                         val latency = (now - timestampMs).coerceAtLeast(0L)
+                        
+                        // Parse detection results and map to our domain model
                         val detections = parseDetections(result, inputImage.width, inputImage.height)
                         onLiveDetectionResult?.invoke(detections, latency, timestampMs)
                     }
@@ -76,7 +84,7 @@ class MediaPipeObjectDetectorHelper(
                 liveDetector = ObjectDetector.createFromOptions(context, options)
                 isInitialized = true
                 onStatusChanged?.invoke(DetectorStatus.Ready)
-                Log.d(TAG, "MediaPipe Live Detector initialized successfully")
+                Log.d(TAG, "MediaPipe Live Detector initialized successfully (GPU=$useGpu)")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to initialize live detector: ${e.message}", e)
                 isInitialized = false
@@ -86,9 +94,16 @@ class MediaPipeObjectDetectorHelper(
         }
     }
 
+    /**
+     * Processes a single camera frame for object detection.
+     * @param bitmap The camera frame as a Bitmap.
+     * @param timestampMs The presentation timestamp of the frame.
+     */
     fun detectLiveStream(bitmap: Bitmap, timestampMs: Long) {
         synchronized(detectorLock) {
             val detector = liveDetector ?: return
+            if (!isInitialized) return
+            
             try {
                 val mpImage = BitmapImageBuilder(bitmap).build()
                 detector.detectAsync(mpImage, timestampMs)
@@ -98,6 +113,9 @@ class MediaPipeObjectDetectorHelper(
         }
     }
 
+    /**
+     * Detects objects in a static image (Blocking call).
+     */
     fun detectImage(bitmap: Bitmap): List<DetectedObject> {
         synchronized(detectorLock) {
             try {
@@ -127,10 +145,16 @@ class MediaPipeObjectDetectorHelper(
         }
     }
 
+    /**
+     * Updates detector settings dynamically.
+     */
     fun updateSettings(threshold: Float, maxResults: Int, useGpu: Boolean) {
+        if (this.threshold == threshold && this.maxResults == maxResults && this.useGpu == useGpu) return
+        
         this.threshold = threshold
         this.maxResults = maxResults
         this.useGpu = useGpu
+        
         setupLiveStreamDetector()
         synchronized(detectorLock) {
             staticDetector?.close()
@@ -153,7 +177,9 @@ class MediaPipeObjectDetectorHelper(
             val score = category?.score() ?: 0.5f
 
             val box = detection.boundingBox()
-            // Normalize coordinates [0f, 1f]
+            
+            // MediaPipe returns bounding box in pixels. 
+            // Normalize coordinates [0f, 1f] for UI rendering.
             val left = (box.left / widthF).coerceIn(0f, 1f)
             val top = (box.top / heightF).coerceIn(0f, 1f)
             val right = (box.right / widthF).coerceIn(left, 1f)
@@ -171,23 +197,6 @@ class MediaPipeObjectDetectorHelper(
         return detected
     }
 
-    private fun ensureModelFileExists() {
-        val assetDir = File(context.filesDir, "models")
-        if (!assetDir.exists()) assetDir.mkdirs()
-        val localModel = File(assetDir, MODEL_FILE_NAME)
-        if (!localModel.exists() || localModel.length() == 0L) {
-            try {
-                context.assets.open(MODEL_FILE_NAME).use { input ->
-                    FileOutputStream(localModel).use { output ->
-                        input.copyTo(output)
-                    }
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Model copy from assets note: ${e.message}")
-            }
-        }
-    }
-
     fun close() {
         synchronized(detectorLock) {
             try {
@@ -195,6 +204,7 @@ class MediaPipeObjectDetectorHelper(
                 liveDetector = null
                 staticDetector?.close()
                 staticDetector = null
+                isInitialized = false
             } catch (e: Exception) {
                 Log.w(TAG, "Error closing detector: ${e.message}")
             }

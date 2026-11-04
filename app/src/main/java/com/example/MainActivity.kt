@@ -95,15 +95,20 @@ fun MainApp() {
         )
     }
 
-    val permissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission()
-    ) { isGranted ->
-        hasCameraPermission = isGranted
+    val permissionsLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { perms ->
+        hasCameraPermission = perms[Manifest.permission.CAMERA] == true
     }
 
     LaunchedEffect(Unit) {
-        if (!hasCameraPermission) {
-            permissionLauncher.launch(Manifest.permission.CAMERA)
+        val toRequest = mutableListOf<String>()
+        if (!hasCameraPermission) toRequest.add(Manifest.permission.CAMERA)
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            toRequest.add(Manifest.permission.RECORD_AUDIO)
+        }
+        if (toRequest.isNotEmpty()) {
+            permissionsLauncher.launch(toRequest.toTypedArray())
         }
     }
 
@@ -213,7 +218,7 @@ fun MainApp() {
                         } else {
                             CameraPermissionRequired(
                                 onRequestPermission = {
-                                    permissionLauncher.launch(Manifest.permission.CAMERA)
+                                    permissionsLauncher.launch(arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO))
                                 }
                             )
                         }

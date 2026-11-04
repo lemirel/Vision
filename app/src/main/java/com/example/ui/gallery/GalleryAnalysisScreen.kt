@@ -78,6 +78,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
+import com.example.BuildConfig
 import com.example.data.model.DetectedObject
 import com.example.ml.MediaPipeObjectDetectorHelper
 import com.example.ui.theme.CyberCyan
@@ -443,7 +444,7 @@ private fun shareAnnotatedImage(context: Context, bitmap: Bitmap) {
 
         val uri = FileProvider.getUriForFile(
             context,
-            "${context.packageName}.fileprovider",
+            "${BuildConfig.APPLICATION_ID}.fileprovider",
             imageFile
         )
 
