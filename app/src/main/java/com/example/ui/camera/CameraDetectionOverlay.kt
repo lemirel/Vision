@@ -199,8 +199,8 @@ private fun DrawScope.drawProminentObjectOverlay(
         val path = Path()
         obj.trajectory.forEachIndexed { i, pt ->
             val mappedPt = mapPointToPreview(
-                normX = pt.x,
-                normY = pt.y,
+                normX = pt.centerX(),
+                normY = pt.centerY(),
                 containerW = containerW,
                 containerH = containerH,
                 sourceW = sourceImageWidth,

@@ -1,6 +1,5 @@
 package com.example.ui.gallery
 
-import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
@@ -8,27 +7,24 @@ import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color as AndroidColor
 import android.graphics.Paint
-import android.graphics.RectF
+import android.graphics.Rect
+import android.graphics.Typeface
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -47,28 +43,24 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddPhotoAlternate
-import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Share
-import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -76,38 +68,29 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.TextMeasurer
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import com.example.data.model.DetectedObject
 import com.example.ml.MediaPipeObjectDetectorHelper
 import com.example.ui.theme.CyberCyan
-import com.example.ui.theme.NeonCyanLight
+import com.example.ui.theme.RecCrimson
 import com.example.ui.theme.SurfaceCardDark
 import com.example.ui.theme.SurfaceDark
 import com.example.ui.theme.TargetAmber
-import com.example.ui.theme.TargetAmberLight
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import java.io.InputStream
 import kotlin.math.min
 
 @Composable
@@ -116,51 +99,33 @@ fun GalleryAnalysisScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val textMeasurer = rememberTextMeasurer()
 
-    var selectedBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var selectedImageUri by remember { mutableStateOf<Uri?>(null) }
+    var loadedBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var annotatedBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var detectedObjects by remember { mutableStateOf<List<DetectedObject>>(emptyList()) }
-    var selectedObjectId by remember { mutableStateOf<Int?>(null) }
     var isAnalyzing by remember { mutableStateOf(false) }
-    var analysisDurationMs by remember { mutableStateOf(0L) }
 
-    // Photo picker launcher
     val photoPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickVisualMedia()
+        contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
         if (uri != null) {
+            selectedImageUri = uri
             scope.launch {
                 isAnalyzing = true
-                val bitmap = loadBitmapFromUri(context, uri)
-                selectedBitmap = bitmap
+                val bitmap = loadDownsampledBitmap(context, uri)
+                loadedBitmap = bitmap
                 if (bitmap != null) {
-                    val start = System.currentTimeMillis()
-                    val results = withContext(Dispatchers.Default) {
+                    val detections = withContext(Dispatchers.Default) {
                         mediaPipeHelper.detectImage(bitmap)
                     }
-                    analysisDurationMs = System.currentTimeMillis() - start
-                    detectedObjects = results
-                    selectedObjectId = results.firstOrNull()?.id
+                    detectedObjects = detections
+                    annotatedBitmap = withContext(Dispatchers.Default) {
+                        renderStaticAnnotatedBitmap(bitmap, detections)
+                    }
                 }
                 isAnalyzing = false
             }
-        }
-    }
-
-    // Helper to generate a built-in test scene with objects if user has no photos yet
-    fun loadSampleImage(sampleType: Int) {
-        scope.launch {
-            isAnalyzing = true
-            val bitmap = createSyntheticTestScene(sampleType)
-            selectedBitmap = bitmap
-            val start = System.currentTimeMillis()
-            val results = withContext(Dispatchers.Default) {
-                mediaPipeHelper.detectImage(bitmap)
-            }
-            analysisDurationMs = System.currentTimeMillis() - start
-            detectedObjects = results
-            selectedObjectId = results.firstOrNull()?.id
-            isAnalyzing = false
         }
     }
 
@@ -182,349 +147,206 @@ fun GalleryAnalysisScreen(
         ) {
             Column {
                 Text(
-                    text = "Gallery Static Detection",
+                    text = "Static Image Analysis",
                     color = Color.White,
                     fontSize = 20.sp,
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    text = "Detect & inspect objects in high resolution",
+                    text = "Detect and inspect objects in existing photos",
                     color = Color.Gray,
                     fontSize = 12.sp
                 )
             }
 
-            // Pick Image Button
             Button(
-                onClick = {
-                    photoPickerLauncher.launch(
-                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                    )
-                },
+                onClick = { photoPickerLauncher.launch("image/*") },
                 colors = ButtonDefaults.buttonColors(containerColor = CyberCyan),
                 shape = RoundedCornerShape(20.dp),
                 modifier = Modifier.testTag("pick_image_button")
             ) {
                 Icon(
                     imageVector = Icons.Default.AddPhotoAlternate,
-                    contentDescription = "Pick Image",
+                    contentDescription = null,
                     tint = Color.Black,
                     modifier = Modifier.size(18.dp)
                 )
                 Spacer(modifier = Modifier.width(6.dp))
-                Text("Pick Image", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                Text("Select", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 13.sp)
             }
         }
 
-        if (selectedBitmap == null) {
-            // Empty State with Sample Test Options
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(SurfaceCardDark)
-                    .border(1.dp, CyberCyan.copy(alpha = 0.2f), RoundedCornerShape(16.dp))
-                    .padding(24.dp),
-                contentAlignment = Alignment.Center
-            ) {
+        // Image Viewport
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1.2f)
+                .clip(RoundedCornerShape(16.dp))
+                .background(Color.Black)
+                .border(1.dp, CyberCyan.copy(alpha = 0.3f), RoundedCornerShape(16.dp)),
+            contentAlignment = Alignment.Center
+        ) {
+            if (annotatedBitmap != null) {
+                Image(
+                    bitmap = annotatedBitmap!!.asImageBitmap(),
+                    contentDescription = "Annotated Image",
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Fit
+                )
+            } else if (loadedBitmap != null) {
+                Image(
+                    bitmap = loadedBitmap!!.asImageBitmap(),
+                    contentDescription = "Original Image",
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Fit
+                )
+            } else {
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center
+                    verticalArrangement = Arrangement.Center,
+                    modifier = Modifier
+                        .clickable { photoPickerLauncher.launch("image/*") }
+                        .padding(24.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Default.Image,
-                        contentDescription = "Select Image Placeholder",
+                        contentDescription = "Pick Image",
                         tint = CyberCyan.copy(alpha = 0.6f),
-                        modifier = Modifier.size(64.dp)
-                    )
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Text(
-                        text = "No Image Loaded",
-                        color = Color.White,
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "Choose an image from your device gallery to analyze all objects with MediaPipe local inference.",
-                        color = Color.Gray,
-                        fontSize = 13.sp,
-                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                    )
-                    Spacer(modifier = Modifier.height(24.dp))
-
-                    Button(
-                        onClick = {
-                            photoPickerLauncher.launch(
-                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                            )
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = CyberCyan),
-                        shape = RoundedCornerShape(24.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.AddPhotoAlternate,
-                            contentDescription = null,
-                            tint = Color.Black
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("Browse Device Gallery", color = Color.Black, fontWeight = FontWeight.Bold)
-                    }
-
-                    Spacer(modifier = Modifier.height(20.dp))
-                    Text(
-                        text = "— OR TRY SYNTHETIC TEST SCENES —",
-                        color = Color.Gray,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold
+                        modifier = Modifier.size(56.dp)
                     )
                     Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = "Tap to choose a photo from gallery",
+                        color = Color.LightGray,
+                        fontSize = 14.sp
+                    )
+                }
+            }
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        OutlinedButton(
-                            onClick = { loadSampleImage(1) },
-                            colors = ButtonDefaults.outlinedButtonColors(contentColor = TargetAmber)
-                        ) {
-                            Text("Desk Scene", fontSize = 12.sp)
-                        }
-                        OutlinedButton(
-                            onClick = { loadSampleImage(2) },
-                            colors = ButtonDefaults.outlinedButtonColors(contentColor = CyberCyan)
-                        ) {
-                            Text("Living Room", fontSize = 12.sp)
-                        }
+            if (isAnalyzing) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.6f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        CircularProgressIndicator(color = CyberCyan)
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text("Analyzing objects with MediaPipe...", color = Color.White, fontSize = 13.sp)
                     }
                 }
             }
-        } else {
-            // Image Analysis View
-            Column(
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        // Detections Summary & Export Actions
+        if (annotatedBitmap != null) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Button(
+                    onClick = {
+                        shareAnnotatedImage(context, annotatedBitmap!!)
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = TargetAmber),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Share,
+                        contentDescription = "Share",
+                        tint = Color.Black,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Share Result", color = Color.Black, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        // Detected Objects List
+        Text(
+            text = "Detections (${detectedObjects.size})",
+            color = Color.White,
+            fontSize = 15.sp,
+            fontWeight = FontWeight.Bold
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+
+        if (detectedObjects.isEmpty()) {
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1f)
+                    .weight(0.8f)
+                    .padding(bottom = 80.dp),
+                contentAlignment = Alignment.Center
             ) {
-                // Image Canvas with bounding boxes
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(300.dp)
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(Color.Black)
-                        .border(1.dp, CyberCyan.copy(alpha = 0.4f), RoundedCornerShape(16.dp))
-                ) {
-                    val bitmap = selectedBitmap!!
-                    Image(
-                        bitmap = bitmap.asImageBitmap(),
-                        contentDescription = "Analyzed Image",
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Fit
-                    )
-
-                    // Bounding Box Overlay
-                    Canvas(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .pointerInput(detectedObjects) {
-                                detectTapGestures { offset ->
-                                    val normX = offset.x / size.width
-                                    val normY = offset.y / size.height
-                                    val clicked = detectedObjects.firstOrNull { it.boundingBox.contains(normX, normY) }
-                                    selectedObjectId = clicked?.id
-                                }
-                            }
+                Text(
+                    text = if (loadedBitmap != null) "No objects detected above confidence threshold" else "Select an image above to see detection results",
+                    color = Color.Gray,
+                    fontSize = 13.sp
+                )
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(0.8f)
+                    .padding(bottom = 80.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(detectedObjects) { obj ->
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = SurfaceCardDark),
+                        shape = RoundedCornerShape(12.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, TargetAmber.copy(alpha = 0.3f))
                     ) {
-                        val canvasW = size.width
-                        val canvasH = size.height
-
-                        detectedObjects.forEach { obj ->
-                            val isSelected = (obj.id == selectedObjectId)
-                            val left = obj.boundingBox.left * canvasW
-                            val top = obj.boundingBox.top * canvasH
-                            val right = obj.boundingBox.right * canvasW
-                            val bottom = obj.boundingBox.bottom * canvasH
-                            val w = right - left
-                            val h = bottom - top
-
-                            val color = if (isSelected) TargetAmber else CyberCyan
-                            val strokeWidth = if (isSelected) 5f else 2.5f
-
-                            // Box
-                            drawRoundRect(
-                                color = color,
-                                topLeft = Offset(left, top),
-                                size = Size(w, h),
-                                cornerRadius = CornerRadius(6f, 6f),
-                                style = Stroke(width = strokeWidth)
-                            )
-
-                            // Label
-                            val labelText = "${obj.label} ${obj.formattedScore()}"
-                            val badgeW = 140f
-                            val badgeH = 34f
-                            val badgeX = left.coerceIn(4f, canvasW - badgeW - 4f)
-                            val badgeY = (top - badgeH - 4f).coerceAtLeast(4f)
-
-                            drawRoundRect(
-                                color = SurfaceDark.copy(alpha = 0.85f),
-                                topLeft = Offset(badgeX, badgeY),
-                                size = Size(badgeW, badgeH),
-                                cornerRadius = CornerRadius(4f, 4f)
-                            )
-                            drawRoundRect(
-                                color = color,
-                                topLeft = Offset(badgeX, badgeY),
-                                size = Size(badgeW, badgeH),
-                                cornerRadius = CornerRadius(4f, 4f),
-                                style = Stroke(width = 1f)
-                            )
-
-                            drawText(
-                                textMeasurer = textMeasurer,
-                                text = labelText,
-                                topLeft = Offset(badgeX + 6f, badgeY + 6f),
-                                style = TextStyle(
-                                    color = Color.White,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            )
-                        }
-                    }
-
-                    if (isAnalyzing) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .background(Color.Black.copy(alpha = 0.6f)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            CircularProgressIndicator(color = CyberCyan)
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                // Stats & Action Bar
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "Found ${detectedObjects.size} objects in ${analysisDurationMs}ms",
-                        color = Color.White,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-
-                    // Export / Share Annotated Image
-                    Button(
-                        onClick = {
-                            scope.launch {
-                                exportAndShareAnnotatedImage(context, selectedBitmap!!, detectedObjects)
-                            }
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = SurfaceCardDark),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, TargetAmber),
-                        shape = RoundedCornerShape(16.dp),
-                        modifier = Modifier.testTag("export_annotated_image_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Share,
-                            contentDescription = "Share",
-                            tint = TargetAmber,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Export & Share", color = TargetAmber, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(10.dp))
-
-                // List of detected objects
-                LazyColumn(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f)
-                        .padding(bottom = 80.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    items(detectedObjects) { obj ->
-                        val isSelected = (obj.id == selectedObjectId)
-                        Card(
-                            colors = CardDefaults.cardColors(
-                                containerColor = if (isSelected) SurfaceCardDark else SurfaceDark
-                            ),
-                            border = androidx.compose.foundation.BorderStroke(
-                                width = if (isSelected) 2.dp else 1.dp,
-                                color = if (isSelected) TargetAmber else CyberCyan.copy(alpha = 0.3f)
-                            ),
-                            shape = RoundedCornerShape(12.dp),
+                        Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clickable { selectedObjectId = obj.id }
+                                .padding(12.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Column(modifier = Modifier.padding(12.dp)) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Box(
-                                            modifier = Modifier
-                                                .size(10.dp)
-                                                .clip(CircleShape)
-                                                .background(if (isSelected) TargetAmber else CyberCyan)
-                                        )
-                                        Spacer(modifier = Modifier.width(8.dp))
-                                        Text(
-                                            text = obj.label,
-                                            color = Color.White,
-                                            fontSize = 15.sp,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                    }
-
-                                    Text(
-                                        text = "${(obj.score * 100).toInt()}% Confidence",
-                                        color = if (isSelected) TargetAmber else CyberCyan,
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.SemiBold
-                                    )
-                                }
-
-                                Spacer(modifier = Modifier.height(8.dp))
-                                LinearProgressIndicator(
-                                    progress = { obj.score },
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(
                                     modifier = Modifier
-                                        .fillMaxWidth()
-                                        .height(6.dp)
-                                        .clip(RoundedCornerShape(3.dp)),
-                                    color = if (isSelected) TargetAmber else CyberCyan,
-                                    trackColor = Color.DarkGray
+                                        .size(12.dp)
+                                        .background(TargetAmber, CircleShape)
                                 )
-
-                                Spacer(modifier = Modifier.height(6.dp))
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column {
                                     Text(
-                                        text = "Box: [${(obj.boundingBox.left * 100).toInt()}%, ${(obj.boundingBox.top * 100).toInt()}%] → [${(obj.boundingBox.right * 100).toInt()}%, ${(obj.boundingBox.bottom * 100).toInt()}%]",
-                                        color = Color.Gray,
-                                        fontSize = 11.sp,
-                                        fontFamily = FontFamily.Monospace
+                                        text = obj.label.uppercase(),
+                                        color = Color.White,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 14.sp
                                     )
                                     Text(
-                                        text = "Area: ${String.format(java.util.Locale.US, "%.1f", obj.area * 100)}%",
+                                        text = "Object #${obj.id}",
                                         color = Color.Gray,
                                         fontSize = 11.sp
                                     )
                                 }
+                            }
+
+                            Surface(
+                                color = TargetAmber.copy(alpha = 0.15f),
+                                shape = RoundedCornerShape(6.dp)
+                            ) {
+                                Text(
+                                    text = "${(obj.score * 100).toInt()}% Match",
+                                    color = TargetAmber,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    fontFamily = FontFamily.Monospace,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                )
                             }
                         }
                     }
@@ -534,20 +356,19 @@ fun GalleryAnalysisScreen(
     }
 }
 
-// Helper: load Bitmap from Uri with safe downsampling to prevent OutOfMemory crashes
-private suspend fun loadBitmapFromUri(context: Context, uri: Uri): Bitmap? = withContext(Dispatchers.IO) {
-    try {
-        val boundsOptions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+/**
+ * Loads image safely with downsampling to avoid out-of-memory errors on large gallery photos.
+ */
+private fun loadDownsampledBitmap(context: Context, uri: Uri): Bitmap? {
+    return try {
+        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         context.contentResolver.openInputStream(uri)?.use { stream ->
-            BitmapFactory.decodeStream(stream, null, boundsOptions)
+            BitmapFactory.decodeStream(stream, null, options)
         }
-        val origW = boundsOptions.outWidth
-        val origH = boundsOptions.outHeight
-        if (origW <= 0 || origH <= 0) return@withContext null
 
-        val maxDim = 1600
+        val maxDim = 1920
         var sampleSize = 1
-        while (origW / (sampleSize * 2) >= maxDim || origH / (sampleSize * 2) >= maxDim) {
+        while (options.outWidth / sampleSize > maxDim || options.outHeight / sampleSize > maxDim) {
             sampleSize *= 2
         }
 
@@ -559,155 +380,80 @@ private suspend fun loadBitmapFromUri(context: Context, uri: Uri): Bitmap? = wit
             BitmapFactory.decodeStream(stream, null, decodeOptions)
         }
     } catch (e: Exception) {
-        android.util.Log.e("GalleryAnalysis", "Error loading bitmap: ${e.message}", e)
         null
     }
 }
 
-// Helper: Create synthetic scenes for static testing if user has no photos
-private fun createSyntheticTestScene(sampleType: Int): Bitmap {
-    val w = 800
-    val h = 600
-    val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-    val canvas = Canvas(bitmap)
-
-    val bgPaint = Paint().apply { color = if (sampleType == 1) 0xFFE0E0E0.toInt() else 0xFF2B3A42.toInt() }
-    canvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), bgPaint)
-
-    val itemPaint = Paint().apply {
-        isAntiAlias = true
-        style = Paint.Style.FILL
-    }
-    val textPaint = Paint().apply {
-        color = AndroidColor.BLACK
-        textSize = 28f
-        isFakeBoldText = true
-    }
-
-    if (sampleType == 1) {
-        // Desk: Laptop, Cup, Cell Phone, Book
-        // Laptop base
-        itemPaint.color = 0xFF505050.toInt()
-        canvas.drawRoundRect(RectF(150f, 250f, 500f, 480f), 20f, 20f, itemPaint)
-        itemPaint.color = 0xFF888888.toInt()
-        canvas.drawRoundRect(RectF(170f, 270f, 480f, 450f), 12f, 12f, itemPaint)
-
-        // Cup
-        itemPaint.color = 0xFFD32F2F.toInt()
-        canvas.drawCircle(600f, 320f, 60f, itemPaint)
-        itemPaint.color = 0xFFFFFFFF.toInt()
-        canvas.drawCircle(600f, 320f, 45f, itemPaint)
-
-        // Cell phone
-        itemPaint.color = 0xFF212121.toInt()
-        canvas.drawRoundRect(RectF(560f, 420f, 650f, 550f), 10f, 10f, itemPaint)
-        itemPaint.color = 0xFF00E5FF.toInt()
-        canvas.drawRoundRect(RectF(568f, 430f, 642f, 540f), 6f, 6f, itemPaint)
-    } else {
-        // Living room: Couch, Chair, TV screen
-        // TV
-        itemPaint.color = 0xFF121212.toInt()
-        canvas.drawRoundRect(RectF(120f, 100f, 680f, 350f), 16f, 16f, itemPaint)
-        itemPaint.color = 0xFF37474F.toInt()
-        canvas.drawRect(RectF(140f, 120f, 660f, 330f), itemPaint)
-
-        // Couch / chair
-        itemPaint.color = 0xFF3E2723.toInt()
-        canvas.drawRoundRect(RectF(150f, 400f, 650f, 560f), 24f, 24f, itemPaint)
-    }
-
-    return bitmap
-}
-
-// Helper: Export annotated image and trigger system share sheet
-private suspend fun exportAndShareAnnotatedImage(
-    context: Context,
-    baseBitmap: Bitmap,
+private fun renderStaticAnnotatedBitmap(
+    source: Bitmap,
     detections: List<DetectedObject>
-) = withContext(Dispatchers.IO) {
-    try {
-        val annotated = baseBitmap.copy(Bitmap.Config.ARGB_8888, true)
-        val canvas = Canvas(annotated)
-        val w = annotated.width.toFloat()
-        val h = annotated.height.toFloat()
+): Bitmap {
+    val result = source.copy(Bitmap.Config.ARGB_8888, true)
+    val canvas = Canvas(result)
+    val w = result.width.toFloat()
+    val h = result.height.toFloat()
+
+    for (obj in detections) {
+        val left = obj.boundingBox.left * w
+        val top = obj.boundingBox.top * h
+        val right = obj.boundingBox.right * w
+        val bottom = obj.boundingBox.bottom * h
 
         val boxPaint = Paint().apply {
-            color = 0xFF00F5D4.toInt()
+            color = 0xFFFFB703.toInt()
             style = Paint.Style.STROKE
             strokeWidth = 6f
             isAntiAlias = true
         }
-        val labelBgPaint = Paint().apply {
-            color = 0xDD080D1A.toInt()
-            style = Paint.Style.FILL
-            isAntiAlias = true
-        }
+        canvas.drawRoundRect(left, top, right, bottom, 12f, 12f, boxPaint)
+
+        val labelText = "🎯 ${obj.label.uppercase()} ${(obj.score * 100).toInt()}%"
         val textPaint = Paint().apply {
             color = AndroidColor.WHITE
             textSize = 28f
             isFakeBoldText = true
             isAntiAlias = true
+            typeface = Typeface.MONOSPACE
+        }
+        val textWidth = textPaint.measureText(labelText)
+        val badgeW = textWidth + 24f
+        val badgeH = 44f
+        val badgeY = if (top - badgeH - 8f < 10f) bottom + 8f else top - badgeH - 8f
+
+        val bgPaint = Paint().apply {
+            color = 0xDD0A0E1A.toInt()
+            style = Paint.Style.FILL
+            isAntiAlias = true
+        }
+        canvas.drawRoundRect(left, badgeY, left + badgeW, badgeY + badgeH, 8f, 8f, bgPaint)
+        canvas.drawRoundRect(left, badgeY, left + badgeW, badgeY + badgeH, 8f, 8f, boxPaint)
+        canvas.drawText(labelText, left + 12f, badgeY + badgeH - 12f, textPaint)
+    }
+
+    return result
+}
+
+private fun shareAnnotatedImage(context: Context, bitmap: Bitmap) {
+    try {
+        val cacheDir = File(context.cacheDir, "shared_images").apply { if (!exists()) mkdirs() }
+        val imageFile = File(cacheDir, "vision_track_${System.currentTimeMillis()}.jpg")
+        FileOutputStream(imageFile).use { out ->
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 92, out)
         }
 
-        detections.forEach { obj ->
-            val left = obj.boundingBox.left * w
-            val top = obj.boundingBox.top * h
-            val right = obj.boundingBox.right * w
-            val bottom = obj.boundingBox.bottom * h
+        val uri = FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.fileprovider",
+            imageFile
+        )
 
-            canvas.drawRoundRect(RectF(left, top, right, bottom), 12f, 12f, boxPaint)
-
-            val label = "${obj.label} ${(obj.score * 100).toInt()}%"
-            val textW = textPaint.measureText(label)
-            val badgeRect = RectF(left, top - 44f, left + textW + 24f, top)
-            canvas.drawRoundRect(badgeRect, 8f, 8f, labelBgPaint)
-            canvas.drawText(label, left + 12f, top - 12f, textPaint)
-        }
-
-        // Save to cache/annotated
-        val dir = File(context.filesDir, "annotated").apply { if (!exists()) mkdirs() }
-        val file = File(dir, "VISION_DETECTION_${System.currentTimeMillis()}.jpg")
-        FileOutputStream(file).use { out ->
-            annotated.compress(Bitmap.CompressFormat.JPEG, 92, out)
-        }
-
-        // Save to Android MediaStore Pictures album safely without mutating deprecated _data
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val values = ContentValues().apply {
-                    put(MediaStore.Images.Media.DISPLAY_NAME, file.name)
-                    put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-                    put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/VisionTrack")
-                    put(MediaStore.Images.Media.IS_PENDING, 1)
-                }
-                val uri = context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
-                if (uri != null) {
-                    context.contentResolver.openOutputStream(uri)?.use { out ->
-                        file.inputStream().use { input -> input.copyTo(out) }
-                    }
-                    values.clear()
-                    values.put(MediaStore.Images.Media.IS_PENDING, 0)
-                    context.contentResolver.update(uri, values, null, null)
-                }
-            }
-        } catch (mediaStoreEx: Exception) {
-            android.util.Log.w("GalleryAnalysis", "MediaStore export notice: ${mediaStoreEx.message}")
-        }
-
-        // Share via FileProvider (compliant with modern Android permissions)
-        val shareUri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
-        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+        val intent = Intent(Intent.ACTION_SEND).apply {
             type = "image/jpeg"
-            putExtra(Intent.EXTRA_STREAM, shareUri)
+            putExtra(Intent.EXTRA_STREAM, uri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-        val chooser = Intent.createChooser(shareIntent, "Share Annotated Detection Image").apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        context.startActivity(chooser)
+        context.startActivity(Intent.createChooser(intent, "Share Object Detection Analysis"))
     } catch (e: Exception) {
-        withContext(Dispatchers.Main) {
-            Toast.makeText(context, "Export error: ${e.message}", Toast.LENGTH_SHORT).show()
-        }
+        Toast.makeText(context, "Export error: ${e.message}", Toast.LENGTH_SHORT).show()
     }
 }

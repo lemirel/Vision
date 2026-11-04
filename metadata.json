@@ -1,6 +1,6 @@
 {
   "name": "VisionTrack",
-  "description": "Real-time object detection and tracking with MediaPipe, static image analysis, and prominent object video recording.",
+  "description": "Real-time object detection and tracking with burned-in HUD video recording and analysis",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

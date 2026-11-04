@@ -8,10 +8,12 @@ import android.graphics.Color as AndroidColor
 import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.Typeface
+import android.media.Image
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.media.MediaMuxer
+import java.util.Arrays
 import android.os.Build
 import android.os.Environment
 import android.os.Handler
@@ -185,8 +187,8 @@ class TrackingVideoRecorder(
 
         Thread {
             try {
-                // Wait for encoder thread to flush and finish MP4 muxing
-                encoderThread?.join(2500)
+                // Wait for encoder thread to flush and finish MP4 muxing cleanly
+                encoderThread?.join(4000)
                 encoderThread = null
 
                 val file = currentOutputFile
@@ -386,6 +388,19 @@ class TrackingVideoRecorder(
                 setInteger(MediaFormat.KEY_BIT_RATE, BIT_RATE)
                 setInteger(MediaFormat.KEY_FRAME_RATE, FRAME_RATE)
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, I_FRAME_INTERVAL)
+                setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
+
+                // Select H.264 Baseline profile for universal playback compatibility on Android / Pixel devices
+                try {
+                    val profileLevels = caps.profileLevels
+                    val hasBaseline = profileLevels.any { it.profile == MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline }
+                    if (hasBaseline) {
+                        setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
+                        setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel31)
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Baseline profile configuration note: ${e.message}")
+                }
             }
 
             codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
@@ -393,41 +408,56 @@ class TrackingVideoRecorder(
 
             muxer = MediaMuxer(outputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
 
-            val yuvBufferSize = width * height * 3 / 2
-            val yuvBuffer = ByteArray(yuvBufferSize)
-            val argbBuffer = IntArray(width * height)
             val bufferInfo = MediaCodec.BufferInfo()
-
             var frameCount = 0L
 
             fun processSingleFrame(frame: Bitmap) {
-                try {
-                    // Safe dimensions handling
-                    if (frame.width == width && frame.height == height) {
-                        frame.getPixels(argbBuffer, 0, width, 0, 0, width, height)
-                    } else {
-                        val scaled = Bitmap.createScaledBitmap(frame, width, height, true)
-                        scaled.getPixels(argbBuffer, 0, width, 0, 0, width, height)
-                        if (scaled != frame) scaled.recycle()
-                    }
-                    if (isSemiPlanar) {
-                        encodeYUV420SP(yuvBuffer, argbBuffer, width, height)
-                    } else {
-                        encodeYUV420P(yuvBuffer, argbBuffer, width, height)
-                    }
-                } finally {
-                    frame.recycle()
+                val inputIndex = try {
+                    codec.dequeueInputBuffer(10_000L)
+                } catch (t: Throwable) {
+                    Log.w(TAG, "dequeueInputBuffer error: ${t.message}")
+                    -1
                 }
 
-                // Feed to MediaCodec input buffer
-                val inputIndex = codec.dequeueInputBuffer(10_000L)
                 if (inputIndex >= 0) {
-                    val inputBuffer = codec.getInputBuffer(inputIndex)
-                    inputBuffer?.clear()
-                    inputBuffer?.put(yuvBuffer)
-                    val presentationTimeUs = (frameCount * 1_000_000L) / FRAME_RATE
-                    codec.queueInputBuffer(inputIndex, 0, yuvBufferSize, presentationTimeUs, 0)
-                    frameCount++
+                    try {
+                        if (frameCount == 0L) {
+                            try {
+                                val syncBundle = android.os.Bundle().apply {
+                                    putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
+                                }
+                                codec.setParameters(syncBundle)
+                            } catch (ignored: Throwable) {}
+                        }
+                        val inputImage = try { codec.getInputImage(inputIndex) } catch (t: Throwable) { null }
+                        val inputBuffer = try { codec.getInputBuffer(inputIndex) } catch (t: Throwable) { null }
+                        val presentationTimeUs = (frameCount * 1_000_000L) / FRAME_RATE
+
+                        val bufferCap = inputBuffer?.capacity()
+                            ?: inputImage?.planes?.getOrNull(0)?.buffer?.capacity()
+                            ?: (width * height * 3 / 2)
+
+                        if (inputImage != null) {
+                            writeBitmapToImage(frame, inputImage)
+                            val yStride = inputImage.planes[0].rowStride
+                            val expectedBytes = yStride * height * 3 / 2
+                            val dataSize = expectedBytes.coerceAtMost(bufferCap)
+                            codec.queueInputBuffer(inputIndex, 0, dataSize, presentationTimeUs, 0)
+                            frameCount++
+                        } else if (inputBuffer != null) {
+                            inputBuffer.clear()
+                            writeBitmapToByteBuffer(frame, inputBuffer, width, height, isSemiPlanar)
+                            val dataSize = (width * height * 3 / 2).coerceAtMost(bufferCap)
+                            codec.queueInputBuffer(inputIndex, 0, dataSize, presentationTimeUs, 0)
+                            frameCount++
+                        }
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "Frame queue error: ${t.message}")
+                    } finally {
+                        frame.recycle()
+                    }
+                } else {
+                    frame.recycle()
                 }
 
                 // Drain output buffers
@@ -458,7 +488,7 @@ class TrackingVideoRecorder(
             var eosQueued = false
             val eosDeadline = SystemClock.uptimeMillis() + 1500
             while (!eosQueued && SystemClock.uptimeMillis() < eosDeadline) {
-                val eosInputIndex = codec.dequeueInputBuffer(10_000L)
+                val eosInputIndex = try { codec.dequeueInputBuffer(10_000L) } catch (t: Throwable) { -1 }
                 if (eosInputIndex >= 0) {
                     val presentationTimeUs = (frameCount * 1_000_000L) / FRAME_RATE
                     codec.queueInputBuffer(eosInputIndex, 0, 0, presentationTimeUs, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
@@ -479,8 +509,10 @@ class TrackingVideoRecorder(
 
         } catch (e: Throwable) {
             Log.e(TAG, "Encoding pipeline error: ${e.message}", e)
+            isRecording.set(false)
             mainHandler.post { onError(e.message ?: "Encoding error") }
         } finally {
+            isRecording.set(false)
             try {
                 codec?.stop()
                 codec?.release()
@@ -516,7 +548,13 @@ class TrackingVideoRecorder(
         var started = isMuxerStarted
 
         while (true) {
-            val outIndex = codec.dequeueOutputBuffer(bufferInfo, if (endOfStream) 15_000L else 0L)
+            val outIndex = try {
+                codec.dequeueOutputBuffer(bufferInfo, if (endOfStream) 15_000L else 0L)
+            } catch (t: Throwable) {
+                Log.w(TAG, "dequeueOutputBuffer exception: ${t.message}")
+                break
+            }
+
             if (outIndex == MediaCodec.INFO_TRY_AGAIN_LATER) {
                 if (!endOfStream) break
             } else if (outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
@@ -539,7 +577,11 @@ class TrackingVideoRecorder(
                         }
                     }
                 }
-                codec.releaseOutputBuffer(outIndex, false)
+                try {
+                    codec.releaseOutputBuffer(outIndex, false)
+                } catch (t: Throwable) {
+                    // Ignore release errors on EOS
+                }
                 if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
                     break
                 }
@@ -548,63 +590,168 @@ class TrackingVideoRecorder(
     }
 
     /**
-     * Fast integer conversion from ARGB to NV12 (YUV420SemiPlanar)
+     * Stride-aware hardware/software image filler that adapts dynamically to
+     * exact rowStride, pixelStride, NV12, or I420 plane layouts provided by Android.
+     * Prevents all stride-shift skew and color corruption.
      */
-    private fun encodeYUV420SP(yuv420sp: ByteArray, argb: IntArray, width: Int, height: Int) {
-        val frameSize = width * height
-        var yIndex = 0
-        var uvIndex = frameSize
-        var index = 0
+    private fun writeBitmapToImage(bitmap: Bitmap, image: Image) {
+        val width = image.width
+        val height = image.height
+        val argb = IntArray(width * height)
 
-        for (j in 0 until height) {
-            for (i in 0 until width) {
-                val c = argb[index++]
+        if (bitmap.width == width && bitmap.height == height) {
+            bitmap.getPixels(argb, 0, width, 0, 0, width, height)
+        } else {
+            val scaled = Bitmap.createScaledBitmap(bitmap, width, height, true)
+            scaled.getPixels(argb, 0, width, 0, 0, width, height)
+            if (scaled != bitmap) scaled.recycle()
+        }
+
+        val planes = image.planes
+        val yPlane = planes[0]
+        val uPlane = planes[1]
+        val vPlane = planes[2]
+
+        val yBuffer = yPlane.buffer
+        val uBuffer = uPlane.buffer
+        val vBuffer = vPlane.buffer
+
+        val yRowStride = yPlane.rowStride
+        val yPixelStride = yPlane.pixelStride
+        val uRowStride = uPlane.rowStride
+        val uPixelStride = uPlane.pixelStride
+        val vRowStride = vPlane.rowStride
+        val vPixelStride = vPlane.pixelStride
+
+        val yCap = yBuffer.capacity()
+        val uCap = uBuffer.capacity()
+        val vCap = vBuffer.capacity()
+
+        // 1. Write Y luminance plane
+        for (row in 0 until height) {
+            val rowStart = row * width
+            val yRowStart = row * yRowStride
+            for (col in 0 until width) {
+                val c = argb[rowStart + col]
+                val r = (c shr 16) and 0xff
+                val g = (c shr 8) and 0xff
+                val b = c and 0xff
+                val y = ((66 * r + 129 * g + 25 * b + 128) shr 8) + 16
+                val idx = yRowStart + col * yPixelStride
+                if (idx < yCap) {
+                    yBuffer.put(idx, (if (y < 16) 16 else if (y > 235) 235 else y).toByte())
+                }
+            }
+        }
+
+        // 2. Write U (Cb) and V (Cr) chrominance planes (2x2 subsampling)
+        val chromaH = height / 2
+        val chromaW = width / 2
+
+        for (chRow in 0 until chromaH) {
+            val srcRow = chRow * 2
+            val rowStart = srcRow * width
+            val uRowStart = chRow * uRowStride
+            val vRowStart = chRow * vRowStride
+
+            for (chCol in 0 until chromaW) {
+                val srcCol = chCol * 2
+                val c = argb[rowStart + srcCol]
                 val r = (c shr 16) and 0xff
                 val g = (c shr 8) and 0xff
                 val b = c and 0xff
 
-                val y = ((66 * r + 129 * g + 25 * b + 128) shr 8) + 16
-                yuv420sp[yIndex++] = (if (y < 16) 16 else if (y > 235) 235 else y).toByte()
+                val u = ((-38 * r - 74 * g + 112 * b + 128) shr 8) + 128
+                val v = ((112 * r - 94 * g - 18 * b + 128) shr 8) + 128
 
-                if (j % 2 == 0 && i % 2 == 0) {
-                    val u = ((-38 * r - 74 * g + 112 * b + 128) shr 8) + 128
-                    val v = ((112 * r - 94 * g - 18 * b + 128) shr 8) + 128
-                    yuv420sp[uvIndex++] = (if (u < 16) 16 else if (u > 240) 240 else u).toByte()
-                    yuv420sp[uvIndex++] = (if (v < 16) 16 else if (v > 240) 240 else v).toByte()
+                val uByte = (if (u < 16) 16 else if (u > 240) 240 else u).toByte()
+                val vByte = (if (v < 16) 16 else if (v > 240) 240 else v).toByte()
+
+                val uIdx = uRowStart + chCol * uPixelStride
+                val vIdx = vRowStart + chCol * vPixelStride
+                if (uIdx < uCap) {
+                    uBuffer.put(uIdx, uByte)
+                }
+                if (vIdx < vCap) {
+                    vBuffer.put(vIdx, vByte)
                 }
             }
         }
     }
 
     /**
-     * Fast integer conversion from ARGB to I420 (YUV420Planar)
+     * Fallback byte buffer writer for devices without Image mapping.
+     * Pre-fills chroma region with 128 (neutral gray) to guarantee NO GREEN NIGHT VISION.
      */
-    private fun encodeYUV420P(yuv420p: ByteArray, argb: IntArray, width: Int, height: Int) {
+    private fun writeBitmapToByteBuffer(
+        bitmap: Bitmap,
+        buffer: ByteBuffer,
+        width: Int,
+        height: Int,
+        isSemiPlanar: Boolean
+    ) {
         val frameSize = width * height
-        val qFrameSize = frameSize / 4
-        var yIndex = 0
-        var uIndex = frameSize
-        var vIndex = frameSize + qFrameSize
-        var index = 0
+        val yuvSize = frameSize * 3 / 2
+        val yuv = ByteArray(yuvSize)
 
+        // Pre-fill chroma plane with neutral 128 to completely prevent green screen
+        Arrays.fill(yuv, frameSize, yuvSize, 128.toByte())
+
+        val argb = IntArray(frameSize)
+        if (bitmap.width == width && bitmap.height == height) {
+            bitmap.getPixels(argb, 0, width, 0, 0, width, height)
+        } else {
+            val scaled = Bitmap.createScaledBitmap(bitmap, width, height, true)
+            scaled.getPixels(argb, 0, width, 0, 0, width, height)
+            if (scaled != bitmap) scaled.recycle()
+        }
+
+        var yIndex = 0
         for (j in 0 until height) {
             for (i in 0 until width) {
-                val c = argb[index++]
+                val c = argb[j * width + i]
                 val r = (c shr 16) and 0xff
                 val g = (c shr 8) and 0xff
                 val b = c and 0xff
-
                 val y = ((66 * r + 129 * g + 25 * b + 128) shr 8) + 16
-                yuv420p[yIndex++] = (if (y < 16) 16 else if (y > 235) 235 else y).toByte()
+                yuv[yIndex++] = (if (y < 16) 16 else if (y > 235) 235 else y).toByte()
+            }
+        }
 
-                if (j % 2 == 0 && i % 2 == 0) {
+        if (isSemiPlanar) {
+            // NV12: interleaved U, V
+            var uvIndex = frameSize
+            for (j in 0 until height step 2) {
+                for (i in 0 until width step 2) {
+                    val c = argb[j * width + i]
+                    val r = (c shr 16) and 0xff
+                    val g = (c shr 8) and 0xff
+                    val b = c and 0xff
                     val u = ((-38 * r - 74 * g + 112 * b + 128) shr 8) + 128
                     val v = ((112 * r - 94 * g - 18 * b + 128) shr 8) + 128
-                    yuv420p[uIndex++] = (if (u < 16) 16 else if (u > 240) 240 else u).toByte()
-                    yuv420p[vIndex++] = (if (v < 16) 16 else if (v > 240) 240 else v).toByte()
+                    yuv[uvIndex++] = (if (u < 16) 16 else if (u > 240) 240 else u).toByte()
+                    yuv[uvIndex++] = (if (v < 16) 16 else if (v > 240) 240 else v).toByte()
+                }
+            }
+        } else {
+            // I420: planar U then V
+            var uIndex = frameSize
+            var vIndex = frameSize + (frameSize / 4)
+            for (j in 0 until height step 2) {
+                for (i in 0 until width step 2) {
+                    val c = argb[j * width + i]
+                    val r = (c shr 16) and 0xff
+                    val g = (c shr 8) and 0xff
+                    val b = c and 0xff
+                    val u = ((-38 * r - 74 * g + 112 * b + 128) shr 8) + 128
+                    val v = ((112 * r - 94 * g - 18 * b + 128) shr 8) + 128
+                    yuv[uIndex++] = (if (u < 16) 16 else if (u > 240) 240 else u).toByte()
+                    yuv[vIndex++] = (if (v < 16) 16 else if (v > 240) 240 else v).toByte()
                 }
             }
         }
+
+        buffer.put(yuv)
     }
 
     private fun saveCompanionTelemetry(videoFile: File) {
@@ -636,9 +783,14 @@ class TrackingVideoRecorder(
 
     private fun addVideoToMediaStore(file: File) {
         try {
+            if (!file.exists() || file.length() == 0L) return
+
+            val now = System.currentTimeMillis() / 1000L
             val values = ContentValues().apply {
                 put(MediaStore.Video.Media.DISPLAY_NAME, file.name)
                 put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                put(MediaStore.Video.Media.DATE_ADDED, now)
+                put(MediaStore.Video.Media.DATE_MODIFIED, now)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     put(MediaStore.Video.Media.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/VisionTrack")
                     put(MediaStore.Video.Media.IS_PENDING, 1)
@@ -650,6 +802,7 @@ class TrackingVideoRecorder(
                     file.inputStream().use { inStream ->
                         inStream.copyTo(outStream)
                     }
+                    outStream.flush()
                 }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     values.clear()

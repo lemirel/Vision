@@ -2,26 +2,20 @@ package com.example.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-// VisionTrack Futuristic Dark Palette
-val BackgroundDark = Color(0xFF080D1A)
-val SurfaceDark = Color(0xFF10192D)
-val SurfaceCardDark = Color(0xFF17233D)
-val SurfaceElevatedDark = Color(0xFF1F2F52)
+val Purple80 = Color(0xFFD0BCFF)
+val PurpleGrey80 = Color(0xFFCCC2DC)
+val Pink80 = Color(0xFFEFB8C8)
 
-val CyberCyan = Color(0xFF00F5D4)
-val NeonCyanLight = Color(0xFF70FFF0)
-val CyberCyanMuted = Color(0xFF007A6A)
+val Purple40 = Color(0xFF6650a4)
+val PurpleGrey40 = Color(0xFF625b71)
+val Pink40 = Color(0xFF7D5260)
 
+// VisionTrack Cyberpunk & HUD Colors
+val CyberCyan = Color(0xFF00E5FF)
+val NeonCyanLight = Color(0xFF80F0FF)
+val RecCrimson = Color(0xFFFF1744)
 val TargetAmber = Color(0xFFFFB703)
 val TargetAmberLight = Color(0xFFFFD166)
-val TargetAmberMuted = Color(0xFF8A6200)
-
-val RecCrimson = Color(0xFFFF3366)
-val RecCrimsonMuted = Color(0xFF991F3D)
-
-val TextPrimary = Color(0xFFF1F5F9)
-val TextSecondary = Color(0xFF94A3B8)
-val TextMuted = Color(0xFF64748B)
-
-val BorderSubtle = Color(0xFF243354)
-val OverlayScrim = Color(0x99080D1A)
+val SurfaceDark = Color(0xFF0A0E1A)
+val SurfaceCardDark = Color(0xFF131A2B)
+val SurfaceCardBorder = Color(0xFF1F293D)

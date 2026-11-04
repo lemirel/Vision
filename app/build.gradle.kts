@@ -68,11 +68,6 @@ android {
     includeInApk = false
     includeInBundle = true
   }
-  packaging {
-    jniLibs {
-      useLegacyPackaging = true
-    }
-  }
 }
 
 // Configure the Secrets Gradle Plugin to use .env and .env.example files
@@ -96,8 +91,6 @@ dependencies {
   implementation(libs.androidx.camera.core)
   implementation(libs.androidx.camera.lifecycle)
   implementation(libs.androidx.camera.view)
-  implementation(libs.androidx.camera.video)
-  implementation(libs.mediapipe.tasks.vision)
   implementation(libs.androidx.compose.material.icons.core)
   implementation(libs.androidx.compose.material.icons.extended)
   implementation(libs.androidx.compose.material3)
@@ -105,16 +98,8 @@ dependencies {
   implementation(libs.androidx.compose.ui.graphics)
   implementation(libs.androidx.compose.ui.tooling.preview)
   implementation(libs.androidx.core.ktx)
-  // implementation(libs.androidx.datastore.preferences)
-  implementation(libs.androidx.lifecycle.runtime.compose)
-  implementation(libs.androidx.lifecycle.runtime.ktx)
-  implementation(libs.androidx.lifecycle.viewmodel.compose)
-  // implementation(libs.androidx.navigation.compose)
-  implementation(libs.androidx.room.ktx)
-  implementation(libs.androidx.room.runtime)
   implementation(libs.coil.compose)
-  implementation(libs.converter.moshi)
-  implementation(libs.firebase.ai)
+  implementation("com.google.mediapipe:tasks-vision:0.10.14")
   // Uncomment to use Firestore:
   // implementation(libs.firebase.firestore)
 
